@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -9,9 +10,12 @@ use Illuminate\Support\Str;
 
 class Payment extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes,HasUuids;
 
     protected $table = 'payments';
+    protected $primaryKey = 'uuid';
+    public $incrementing = false;
+    protected $keyType = 'string';
 
     protected $fillable = [
         'uuid',
@@ -19,12 +23,19 @@ class Payment extends Model
         'invoices_uuid',
         'amount',
         'payment_method',
+        'phone',
         'gateway',
         'reference',
+        'comment',
+        'reason',
         'status',
         'gateway_response',
         'created_by',
         'updated_by',
+        'regulation_methods_uuid',
+        'cancellation_reason',
+        'cancelled_at',
+        'cancelled_by',
     ];
 
     protected $casts = [
@@ -32,16 +43,6 @@ class Payment extends Model
         'amount' => 'decimal:2',
     ];
 
-    protected static function boot()
-    {
-        parent::boot();
-
-        static::creating(function ($model) {
-            if (empty($model->uuid)) {
-                $model->uuid = (string) Str::uuid();
-            }
-        });
-    }
     public function invoice()
     {
         return $this->belongsTo(Invoice::class, 'invoices_uuid', 'uuid');
@@ -50,5 +51,13 @@ class Payment extends Model
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+    public function regulation_methods()
+    {
+        return $this->belongsTo(RegulationMethod::class, 'regulation_methods_uuid', 'uuid');
+    }
+    public function cancellor()
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
     }
 }

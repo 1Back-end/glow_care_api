@@ -45,6 +45,11 @@ class RoleController extends Controller
             'permissions:id,name,description',
             'establishment:uuid,name',
         ])
+            ->when($currentUser?->is_super_admin, function ($q) {
+                $q->where('is_super_admin', true);
+            }, function ($q) {
+                $q->where('is_client', true);
+            })
             ->when(!$currentUser?->is_super_admin && $establishmentUuid, function ($q) use ($establishmentUuid) {
                 $q->where('establishment_uuid', $establishmentUuid);
             })
@@ -80,29 +85,51 @@ class RoleController extends Controller
      * @permission_desc Créer un role
      * @throws \Throwable
      */
-    public function store(RoleRequest $request,LicenseService $licenseService): JsonResponse
+    public function store(RoleRequest $request, LicenseService $licenseService): JsonResponse
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
+
         $establishmentUuid = $request->header('X-Establishment-Uuid');
+        $currentUser = auth()->user();
+
         DB::beginTransaction();
         try {
             $roleData = $request->validated();
             $roleData['name'] = strtoupper($roleData['name']);
+
             if ($establishmentUuid) {
                 $roleData['establishment_uuid'] = $establishmentUuid;
             }
+
+            $roleData['is_super_admin'] = (bool) ($currentUser?->is_super_admin ?? false);
+            $roleData['is_client']      = !$roleData['is_super_admin'] && (bool) ($currentUser?->is_client ?? false);
+            $roleData['created_by']     = $currentUser?->id;
+            $roleData['updated_by']     = $currentUser?->id;
+
             $role = Role::create($roleData);
-            if ($request->input('permissions')) {
+
+            if ($request->has('permissions') && is_array($request->input('permissions'))) {
                 foreach ($request->input('permissions') as $permission) {
-                    $role->permissions()->attach($permission['id'], [
-                        'created_by' => auth()->id(),
-                        'updated_by' => auth()->id(),
-                        'establishment_uuid' => $establishmentUuid,
-                    ]);
+                    $permissionId = is_array($permission) ? ($permission['id'] ?? null) : $permission;
+
+                    if ($permissionId) {
+                        $role->permissions()->attach($permissionId, [
+                            'created_by'         => $currentUser?->id,
+                            'updated_by'         => $currentUser?->id,
+                            'establishment_uuid' => $establishmentUuid,
+                        ]);
+                    }
                 }
             }
+
+            DB::commit();
+
+            return response()->json([
+                'message' => __("Le rôle a été créé avec succès !")
+            ], Response::HTTP_CREATED);
+
         } catch (\Exception $e) {
             DB::rollBack();
             Log::error($e->getMessage());
@@ -111,12 +138,6 @@ class RoleController extends Controller
                 'message' => __("Une erreur s'est produite lors de la création du rôle !")
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
-
-        DB::commit();
-
-        return response()->json([
-            'message' => __("Le rôle a été créé avec succès !")
-        ], Response::HTTP_CREATED);
     }
 
 
@@ -143,16 +164,18 @@ class RoleController extends Controller
      * @permission_desc Mise à jour d’un rôle
      * @throws \Throwable
      */
-    public function update(RoleRequest $request, Role $role,LicenseService $licenseService): JsonResponse
+    public function update(RoleRequest $request, Role $role, LicenseService $licenseService): JsonResponse
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
+
         $establishmentUuid = $request->header('X-Establishment-Uuid');
+        $currentUser = auth()->user();
 
         DB::beginTransaction();
         try {
-            $data = $request->validated();
+            $data = $request->except(['is_super_admin', 'is_client', 'is_sub_user']);
 
             if ($role->id === 1) {
                 unset($data['name']);
@@ -162,26 +185,49 @@ class RoleController extends Controller
                 }
             }
 
+            if ($currentUser?->is_super_admin) {
+                $data['is_super_admin'] = true;
+                $data['is_client'] = false;
+            } elseif ($currentUser?->is_client) {
+                $data['is_super_admin'] = false;
+                $data['is_client'] = true;
+            }
+
             if ($establishmentUuid) {
                 $data['establishment_uuid'] = $establishmentUuid;
             }
 
-            $role->update($data);
+            $data['updated_by'] = $currentUser?->id;
 
+            $role->update($data);
 
             if ($request->has('permissions')) {
                 $role->permissions()->detach();
 
-                if ($request->input('permissions')) {
-                    foreach ($request->input('permissions') as $permission) {
-                        $role->permissions()->attach($permission['id'], [
-                            'created_by'         => auth()->id(),
-                            'updated_by'         => auth()->id(),
-                            'establishment_uuid' => $establishmentUuid,
-                        ]);
+                $permissionsInput = $request->input('permissions');
+                if (!empty($permissionsInput) && is_array($permissionsInput)) {
+                    foreach ($permissionsInput as $permission) {
+                        $permissionId = is_array($permission) ? ($permission['id'] ?? null) : $permission;
+
+                        if ($permissionId) {
+                            $role->permissions()->attach($permissionId, [
+                                'created_by'         => $currentUser?->id,
+                                'updated_by'         => $currentUser?->id,
+                                'establishment_uuid' => $establishmentUuid,
+                            ]);
+                        }
                     }
                 }
             }
+
+            DB::commit();
+
+            return response()->json([
+                'message' => __("Mise à jour du rôle effectuée avec succès !"),
+                'role'    => $role,
+                'validated' => $request->validated()
+            ]);
+
         } catch (\Exception $e) {
             DB::rollBack();
             Log::error($e->getMessage());
@@ -190,14 +236,6 @@ class RoleController extends Controller
                 'message' => __("Une erreur s'est produite lors de la mise à jour du rôle !")
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
-
-        DB::commit();
-
-        return response()->json([
-            'message' => __("Mise à jour du rôle effectuée avec succès !"),
-            'role' => $role,
-            'validated' => $request->validated()
-        ]);
     }
 
 

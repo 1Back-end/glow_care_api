@@ -25,7 +25,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 
 /**
- * @permission_category Gestion des demandes d'abonnements
+ * @permission_category Demandes d'abonnements
  */
 
 class SubscriptionRequestController extends Controller

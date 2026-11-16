@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\PrestationCategory;
 use App\Enums\StateFacture;
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -14,7 +15,7 @@ use Illuminate\Support\Str;
 
 class Invoice extends Model
 {
-    use HasFactory, SoftDeletes;
+    use HasFactory, SoftDeletes,HasUuids;
 
     protected $table = 'invoices';
     protected $primaryKey = 'uuid';
@@ -50,6 +51,8 @@ class Invoice extends Model
         'regulated_label',
         'total_amount',
         'total_remise',
+        'total_paid',
+        'remaining_amount',
         'qr_code_file',
     ];
     public function getQrCodeFileAttribute()
@@ -70,10 +73,6 @@ class Invoice extends Model
         parent::boot();
 
         static::creating(function ($model) {
-
-            if (empty($model->uuid)) {
-                $model->uuid = (string) Str::uuid();
-            }
 
             if (empty($model->code)) {
                 DB::transaction(function () use ($model) {
@@ -120,6 +119,25 @@ class Invoice extends Model
             return max(0, $subtotal - $remise);
         });
     }
+    /**
+     * Montant total déjà payé
+     */
+    public function getTotalPaidAttribute(): float
+    {
+        return (float) $this->payments
+            ->where('status', '!=', 'cancelled')
+            ->sum(function ($payment) {
+                return (float) ($payment->amount ?? 0);
+            });
+    }
+
+    /**
+     * Montant reste à payer
+     */
+    public function getRemainingAmountAttribute(): float
+    {
+        return max(0, round($this->total_amount - $this->total_paid, 2));
+    }
 
     public function getTotalRemiseAttribute(): float
     {
@@ -160,5 +178,9 @@ class Invoice extends Model
     public function cancellor()
     {
         return $this->belongsTo(User::class, 'cancelled_by');
+    }
+    public function payments()
+    {
+        return $this->hasMany(Payment::class, 'invoices_uuid', 'uuid');
     }
 }

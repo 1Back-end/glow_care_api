@@ -20,9 +20,9 @@ class NotificationController extends Controller
         $user = auth()->user();
 
         if ($user->is_super_admin) {
-            $notifications = \Illuminate\Notifications\DatabaseNotification::latest()->paginate(25);
+            $notifications = \Illuminate\Notifications\DatabaseNotification::latest()->paginate(10);
         } else {
-            $notifications = $user->notifications()->paginate(25);
+            $notifications = $user->notifications()->paginate(10);
         }
 
         return response()->json([

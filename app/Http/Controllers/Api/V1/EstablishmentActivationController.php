@@ -5,8 +5,6 @@ namespace App\Http\Controllers\Api\V1;
 use App\Enums\ActivationStatus;
 use App\Models\Establishment;
 use App\Models\EstablishmentActivation;
-use App\Models\License;
-use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Carbon\Carbon;

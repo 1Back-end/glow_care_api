@@ -229,8 +229,6 @@ class AppointmentController extends Controller
                 ->pluck('user_id');
 
             $users = User::whereIn('id', $userIds)->get();
-            \Log::info('Utilisateurs notifiés : ' . $users->count());
-
             $formattedDate = \Carbon\Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
             $message = "Rendez-vous modifié : {$appointment->client?->full_name} pour la prestation « {$appointment->prestation?->name} » prévue le {$formattedDate}.";
 
@@ -326,7 +324,6 @@ class AppointmentController extends Controller
                 ->pluck('user_id');
 
             $users = User::whereIn('id', $userIds)->get();
-            \Log::info('Utilisateurs à notifier : ' . $users->count());
 
             $formattedDate = Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
             $message = "Rendez-vous annulé : {$appointment->client?->full_name} (Prévu le {$formattedDate}). Motif : {$validated['reason_rejected']}";
@@ -382,8 +379,6 @@ class AppointmentController extends Controller
                 ->pluck('user_id');
 
             $users = User::whereIn('id', $userIds)->get();
-            \Log::info('Utilisateurs à notifier (validation) : ' . $users->count());
-
             $formattedDate = Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
             $message = "Rendez-vous confirmé : {$appointment->client?->full_name} (Prévu le {$formattedDate}).";
 

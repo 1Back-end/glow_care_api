@@ -12,6 +12,8 @@ use App\Models\Establishment;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\InvoicesFacture;
+use App\Models\Payment;
+use App\Models\RegulationMethod;
 use App\Models\UserEstablishment;
 use App\Services\LicenseService;
 use App\Services\UserAuthorizationService;
@@ -22,6 +24,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 /**
@@ -54,7 +57,12 @@ class InvoiceController extends Controller
         $page = $request->input('page', 1);
         $currentUser = auth()->user();
 
-        $query = Invoice::with(['client:uuid,code,full_name', 'creator:id,nom_utilisateur', 'updater:id,nom_utilisateur', 'items.prestation','facture'])
+        $query = Invoice::with(['client:uuid,code,full_name', 'creator:id,nom_utilisateur', 'updater:id,nom_utilisateur', 'items.prestation','facture',
+            'payments' => function ($query) {
+                $query->where('status', '!=', 'cancelled');
+            },
+            'payments.regulation_methods:uuid,name'
+            ])
             ->when(!$currentUser?->is_super_admin, function ($q) use ($currentUser) {
                 $userEstablishmentUuids = UserEstablishment::where('user_id', $currentUser->id)
                     ->pluck('establishment_uuid');
@@ -373,7 +381,7 @@ class InvoiceController extends Controller
     {
         try {
             $invoice = Invoice::where('uuid', $uuid)
-                ->with(['client', 'creator', 'updater', 'items.prestation','establishment','facture'])
+                ->with(['client', 'creator', 'updater', 'items.prestation','establishment','facture','payments.regulation_methods:uuid,name','payments.cancellor:id,nom_utilisateur','payments.creator:id,nom_utilisateur'])
                 ->firstOrFail();
 
             return response()->json([
@@ -454,116 +462,293 @@ class InvoiceController extends Controller
     }
 
 
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission InvoiceController::initiatePayment
+     * @permission_desc Encaisser une facture
+     */
     public function initiatePayment(Request $request, $uuid, LicenseService $licenseService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
 
-        $invoice = Invoice::with('client')->where('uuid', $uuid)->firstOrFail();
-        $paymentMethodInput = $request->input('payment_method', PaymentMethodEnum::CASH->value);
+        $auth = auth()->user();
+        $this->authService->denyIfSuperAdmin($auth);
 
-        $user = auth()->user();
-        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $user->establishment_uuid;
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $auth->establishment_uuid;
 
-        $amountToPay = $invoice->total_to_pay ?? $invoice->total_amount;
+        $invoice = Invoice::where('establishment_uuid', $establishmentUuid)
+            ->where('uuid', $uuid)
+            ->firstOrFail();
 
-        if ($paymentMethodInput === PaymentMethodEnum::CASH->value) {
-            \DB::transaction(function () use ($invoice, $amountToPay, $establishmentUuid, $user, $paymentMethodInput) {
-                \App\Models\Payment::create([
-                    'establishment_uuid' => $establishmentUuid,
-                    'invoices_uuid'      => $invoice->uuid,
-                    'amount'             => $amountToPay,
-                    'payment_method'     => $paymentMethodInput,
-                    'gateway'            => 'manual',
-                    'status'             => 'success',
-                    'created_by'         => $user->id,
-                ]);
+        $validated = $request->validate([
+            'regulations'             => 'required|array|min:1',
+            'regulations.*.method'    => 'required|exists:regulation_methods,uuid',
+            'regulations.*.amount'    => 'required|numeric|gt:0',
+            'regulations.*.phone'     => 'nullable|string',
+            'regulations.*.reference' => 'nullable|string',
+            'regulations.*.comment'   => 'nullable|string',
+        ], [
+            'regulations.*.amount.gt' => 'Le montant du règlement doit être supérieur à 0.',
+        ]);
 
-                $invoice->update([
-                    'regulated' => StateFacture::PAID->value,
-                    'state'     => true,
-                ]);
+        $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
 
-                if ($invoice->facture) {
-                    $invoice->facture->update([
-                        'state_facture' => StateFacture::PAID->value
+        $existingPaymentsSum = Payment::where('invoices_uuid', $invoice->uuid)
+            ->where('status', '!=', 'cancelled')
+            ->sum('amount');
+
+        $newPaymentsSum = collect($validated['regulations'])->sum('amount');
+
+        if (($existingPaymentsSum + $newPaymentsSum) > $totalInvoiceAmount) {
+            $remainingDue = max(0, $totalInvoiceAmount - $existingPaymentsSum);
+            throw ValidationException::withMessages([
+                'regulations' => ["Le montant total des paiements dépasse le montant dû de la facture. Reste à payer : {$remainingDue} FCFA."]
+            ]);
+        }
+
+        foreach ($validated['regulations'] as $index => $regData) {
+            $regulationMethod = RegulationMethod::where('uuid', $regData['method'])->first();
+
+            if ($regulationMethod) {
+                if (!empty($regulationMethod->comment_required) && empty($regData['comment'])) {
+                    throw ValidationException::withMessages([
+                        "regulations.{$index}.comment" => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
                     ]);
                 }
-            });
+
+                if (!empty($regulationMethod->reference_required) && empty($regData['reference'])) {
+                    throw ValidationException::withMessages([
+                        "regulations.{$index}.reference" => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                    ]);
+                }
+                if (!empty($regulationMethod->phone_required) && empty($regData['phone'])) {
+                    throw ValidationException::withMessages([
+                        "regulations.{$index}.phone" => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                    ]);
+                }
+            }
+        }
+
+        return DB::transaction(function () use ($validated, $invoice, $establishmentUuid, $auth, $totalInvoiceAmount, $existingPaymentsSum, $newPaymentsSum) {
+            foreach ($validated['regulations'] as $regData) {
+                Payment::create([
+                    'establishment_uuid'      => $establishmentUuid,
+                    'invoices_uuid'           => $invoice->uuid,
+                    'regulation_methods_uuid' => $regData['method'],
+                    'amount'                  => $regData['amount'],
+                    'phone'                   => $regData['phone'] ?? null,
+                    'reference'               => $regData['reference'] ?? null,
+                    'comment'                 => $regData['comment'] ?? null,
+                    'status'                  => 'completed',
+                    'created_by'              => $auth->id ?? null,
+                ]);
+            }
+
+            $totalPaidNow = $existingPaymentsSum + $newPaymentsSum;
+
+            if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
+                $newStatus = StateFacture::PAID->value;
+            } elseif ($totalPaidNow > 0) {
+                $newStatus = StateFacture::IN_PROGRESS->value;
+            } else {
+                $newStatus = StateFacture::CREATE->value;
+            }
+
+            $invoice->update([
+                'regulated'  => $newStatus,
+                'updated_by' => $auth->id ?? null,
+            ]);
 
             return response()->json([
                 'success' => true,
-                'message' => 'Paiement en espèces validé avec succès.'
+                'message' => 'Encaissements enregistrés avec succès.',
+                'data'    => $invoice->fresh()->load(['payments.regulation_methods', 'payments.cancellor']),
+            ], 200);
+        });
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission InvoiceController::cancelPayment
+     * @permission_desc Annuler un encaissement
+     */
+    public function cancelPayment(Request $request, $uuid, LicenseService $licenseService)
+    {
+        if ($errorResponse = $licenseService->validateActiveLicense($request)) {
+            return $errorResponse;
+        }
+
+        $auth = auth()->user();
+        $this->authService->denyIfSuperAdmin($auth);
+
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $auth->establishment_uuid;
+
+        $validated = $request->validate([
+            'cancellation_reason' => 'required|string|min:3',
+        ], [
+            'cancellation_reason.required' => 'La raison de l\'annulation est obligatoire.',
+            'cancellation_reason.min'      => 'La raison de l\'annulation doit contenir au moins 3 caractères.',
+        ]);
+
+        $payment = Payment::where('establishment_uuid', $establishmentUuid)
+            ->where('uuid', $uuid)
+            ->firstOrFail();
+
+        if ($payment->status === 'cancelled') {
+            throw ValidationException::withMessages([
+                'payment' => ['Ce paiement a déjà été annulé.']
             ]);
         }
 
-        $reference = 'INV_' . $invoice->code . '_' . time();
-        $publicKey = config('services.notchpay.public_key');
+        $invoice = Invoice::where('establishment_uuid', $establishmentUuid)
+            ->where('uuid', $payment->invoices_uuid)
+            ->firstOrFail();
 
-        $response = Http::withHeaders([
-            'Authorization' => $publicKey,
-            'Accept'        => 'application/json',
-        ])
-            ->post('https://api.notchpay.co/payments/initialize', [
-                'email'        => $invoice->client->email ?? 'client@glowcare.com',
-                'name'         => $invoice->client->full_name ?? 'Client Institut',
-                'amount'       => (int) $amountToPay,
-                'currency'     => 'XAF',
-                'reference'    => $reference,
-                'description'  => 'Paiement de la facture ' . $invoice->code,
-                'callback_url' => 'http://localhost:4300/admin/invoices-index',
+        return DB::transaction(function () use ($payment, $invoice, $validated, $auth) {
+            $payment->update([
+                'status'              => 'cancelled',
+                'cancellation_reason' => $validated['cancellation_reason'],
+                'cancelled_at'        => now(),
+                'cancelled_by'        => $auth->id ?? null,
+                'updated_by'          => $auth->id ?? null,
             ]);
 
-        $result = $response->json();
+            $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
 
-        if (!$response->successful()) {
-            Log::error("Erreur API NotchPay - Status: " . $response->status(), [
-                'response' => $result,
-                'payload' => [
-                    'amount' => (int) $amountToPay,
-                    'reference' => $reference
-                ]
+            $totalPaidNow = Payment::where('invoices_uuid', $invoice->uuid)
+                ->where('status', '!=', 'cancelled')
+                ->sum('amount');
+
+            if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
+                $newStatus = StateFacture::PAID->value;
+            } elseif ($totalPaidNow > 0) {
+                $newStatus = StateFacture::IN_PROGRESS->value;
+            } else {
+                $newStatus = StateFacture::CREATE->value;
+            }
+
+            $invoice->update([
+                'regulated'  => $newStatus,
+                'updated_by' => $auth->id ?? null,
             ]);
-        }
-
-        if ($response->successful() && isset($result['authorization_url'])) {
-            \DB::transaction(function () use ($establishmentUuid, $invoice, $amountToPay, $paymentMethodInput, $reference, $result, $user) {
-                \App\Models\Payment::create([
-                    'establishment_uuid' => $establishmentUuid,
-                    'invoices_uuid'      => $invoice->uuid,
-                    'amount'             => $amountToPay,
-                    'payment_method'     => $paymentMethodInput,
-                    'gateway'            => 'notchpay',
-                    'reference'          => $reference,
-                    'status'             => 'pending',
-                    'gateway_response'   => $result,
-                    'created_by'         => $user->id,
-                ]);
-
-                $invoice->update([
-                    'regulated' => StateFacture::PAID->value,
-                    'state'     => true,
-                ]);
-
-                if ($invoice->facture) {
-                    $invoice->facture->update([
-                        'state_facture' => StateFacture::PAID->value
-                    ]);
-                }
-            });
 
             return response()->json([
-                'success'     => true,
-                'payment_url' => $result['authorization_url']
+                'success' => true,
+                'message' => 'Paiement annulé avec succès.',
+                'data'    => $invoice->fresh()->load(['payments.regulation_methods', 'payments.cancellor']),
+            ], 200);
+        });
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission InvoiceController::updatePayment
+     * @permission_desc Modifier un encaissement
+     */
+    public function updatePayment(Request $request, $uuid, LicenseService $licenseService)
+    {
+        if ($errorResponse = $licenseService->validateActiveLicense($request)) {
+            return $errorResponse;
+        }
+
+        $auth = auth()->user();
+        $this->authService->denyIfSuperAdmin($auth);
+
+
+        $payment = Payment::where('uuid', $uuid)
+            ->firstOrFail();
+
+        if ($payment->status === 'cancelled') {
+            throw ValidationException::withMessages([
+                'payment' => ['Impossible de modifier un paiement annulé.']
             ]);
         }
 
-        return response()->json([
-            'success' => false,
-            'message' => "Erreur lors de l'initialisation avec Notch Pay",
-            'error'   => $result
-        ], 400);
+        $validated = $request->validate([
+            'method'    => 'required|exists:regulation_methods,uuid',
+            'amount'    => 'required|numeric|gt:0',
+            'phone'     => 'nullable|string',
+            'reference' => 'nullable|string',
+            'comment'   => 'nullable|string',
+        ], [
+            'amount.gt' => 'Le montant du règlement doit être supérieur à 0.',
+        ]);
+
+        $invoice = Invoice::where('uuid', $payment->invoices_uuid)
+            ->firstOrFail();
+
+        $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
+
+        $otherPaymentsSum = Payment::where('invoices_uuid', $invoice->uuid)
+            ->where('uuid', '!=', $payment->uuid)
+            ->where('status', '!=', 'cancelled')
+            ->sum('amount');
+
+        if (($otherPaymentsSum + $validated['amount']) > $totalInvoiceAmount) {
+            $remainingDue = max(0, $totalInvoiceAmount - $otherPaymentsSum);
+            throw ValidationException::withMessages([
+                'amount' => ["Le montant total dépasse le montant dû de la facture. Maximum autorisé pour ce paiement : {$remainingDue} FCFA."]
+            ]);
+        }
+
+        $regulationMethod = RegulationMethod::where('uuid', $validated['method'])->first();
+        if ($regulationMethod) {
+            if (!empty($regulationMethod->comment_required) && empty($validated['comment'])) {
+                throw ValidationException::withMessages([
+                    'comment' => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                ]);
+            }
+            if (!empty($regulationMethod->reference_required) && empty($validated['reference'])) {
+                throw ValidationException::withMessages([
+                    'reference' => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                ]);
+            }
+            if (!empty($regulationMethod->phone_required) && empty($validated['phone'])) {
+                throw ValidationException::withMessages([
+                    'phone' => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                ]);
+            }
+        }
+
+        return DB::transaction(function () use ($payment, $invoice, $validated, $auth, $totalInvoiceAmount, $otherPaymentsSum) {
+            $payment->update([
+                'regulation_methods_uuid' => $validated['method'],
+                'amount'                  => $validated['amount'],
+                'phone'                   => $validated['phone'] ?? null,
+                'reference'               => $validated['reference'] ?? null,
+                'comment'                 => $validated['comment'] ?? null,
+                'updated_by'              => $auth->id ?? null,
+            ]);
+
+            $totalPaidNow = $otherPaymentsSum + $validated['amount'];
+
+            if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
+                $newStatus = StateFacture::PAID->value;
+            } elseif ($totalPaidNow > 0) {
+                $newStatus = StateFacture::IN_PROGRESS->value;
+            } else {
+                $newStatus = StateFacture::CREATE->value;
+            }
+
+            $invoice->update([
+                'regulated'  => $newStatus,
+                'updated_by' => $auth->id ?? null,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Paiement modifié avec succès.',
+                'data'    => $invoice->fresh()->load(['payments.regulation_methods', 'payments.cancellor']),
+            ], 200);
+        });
     }
 
 

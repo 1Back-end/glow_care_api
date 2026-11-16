@@ -40,14 +40,19 @@ class UserController extends Controller
         $currentUser = auth()->user();
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        $users = User::query()->where('is_super_admin',false)
-            ->when(!$currentUser?->is_super_admin && $establishmentUuid, function ($query) use ($establishmentUuid) {
-                $query->where(function ($q) use ($establishmentUuid) {
-                    $q->where('establishment_uuid', $establishmentUuid)
-                        ->orWhereHas('establishments', function ($subQ) use ($establishmentUuid) {
-                            $subQ->where('establishments.uuid', $establishmentUuid);
-                        });
-                });
+        $users = User::query()
+            ->where('is_super_admin', false)
+            ->when(!$currentUser?->is_super_admin, function ($query) use ($establishmentUuid) {
+                $query->where('is_sub_user', true);
+
+                if ($establishmentUuid) {
+                    $query->where(function ($q) use ($establishmentUuid) {
+                        $q->where('establishment_uuid', $establishmentUuid)
+                            ->orWhereHas('establishments', function ($subQ) use ($establishmentUuid) {
+                                $subQ->where('establishments.uuid', $establishmentUuid);
+                            });
+                    });
+                }
             })
             ->when($request->input('roles'), function ($query) use ($request) {
                 $query->whereHas('roles', function ($q) use ($request) {
@@ -71,7 +76,6 @@ class UserController extends Controller
             ->when($request->has('status'), function ($query) use ($request) {
                 $query->where('status', $request->boolean('status'));
             })
-            ->whereNotIn('login', ['SYSTEM', 'admin'])
             ->with([
                 'roles:id,name',
                 'permissions:id,name',
@@ -99,16 +103,21 @@ class UserController extends Controller
      * @permission_desc Créer un utilisateur
      * @throws \Throwable
      */
-    public function store(UserRequest $request,LicenseService $licenseService): JsonResponse
+    public function store(UserRequest $request, LicenseService $licenseService): JsonResponse
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
+
         $establishmentUuidHeader = $request->header('X-Establishment-Uuid');
+        $currentUser = auth()->user();
 
         DB::beginTransaction();
         try {
             $defaultPassword = '1234567';
+
+            $isClient = (bool) ($currentUser?->is_super_admin ?? false);
+            $isSubUser = !$isClient && (bool) ($currentUser?->is_client ?? false);
 
             $user = User::create(array_merge(
                 $request->validated(),
@@ -116,15 +125,18 @@ class UserController extends Controller
                     'password'           => Hash::make($defaultPassword),
                     'default'            => true,
                     'establishment_uuid' => $establishmentUuidHeader,
-                    'updated_by' => auth()->id()
+                    'is_client'          => $isClient,
+                    'is_sub_user'        => $isSubUser,
+                    'created_by'         => $currentUser?->id,
+                    'updated_by'         => $currentUser?->id,
                 ]
             ));
 
             if ($request->has('roles')) {
                 foreach ($request->roles as $role) {
                     $user->roles()->attach($role, [
-                        'created_by' => auth()->id(),
-                        'updated_by' => auth()->id()
+                        'created_by' => $currentUser?->id,
+                        'updated_by' => $currentUser?->id,
                     ]);
                 }
             }
@@ -140,14 +152,16 @@ class UserController extends Controller
                         : $estData;
 
                     if ($estUuid) {
-                        $isDefault = is_array($estData) ? filter_var($estData['default'] ?? false, FILTER_VALIDATE_BOOLEAN) : false;
+                        $isDefault = is_array($estData)
+                            ? filter_var($estData['default'] ?? false, FILTER_VALIDATE_BOOLEAN)
+                            : false;
 
                         \App\Models\UserEstablishment::create([
                             'user_id'            => $user->id,
                             'establishment_uuid' => $estUuid,
                             'default'            => $isDefault,
-                            'created_by'         => auth()->id(),
-                            'updated_by'         => auth()->id(),
+                            'created_by'         => $currentUser?->id,
+                            'updated_by'         => $currentUser?->id,
                         ]);
 
                         if ($isDefault) {
@@ -164,8 +178,8 @@ class UserController extends Controller
                     'user_id'            => $user->id,
                     'establishment_uuid' => $establishmentUuidHeader,
                     'default'            => true,
-                    'created_by'         => auth()->id(),
-                    'updated_by'         => auth()->id(),
+                    'created_by'         => $currentUser?->id,
+                    'updated_by'         => $currentUser?->id,
                 ]);
             }
 
@@ -174,7 +188,7 @@ class UserController extends Controller
             return response()->json([
                 'message'  => __("L'utilisateur a été créé avec succès !"),
                 'login'    => $user->login,
-                'password' => $defaultPassword
+                'password' => $defaultPassword,
             ], Response::HTTP_CREATED);
 
         } catch (\Exception $th) {
@@ -216,20 +230,33 @@ class UserController extends Controller
      * @permission UserController::update
      * @permission_desc Modifier un utilisateur
      */
-    public function update(UserRequest $request, User $user,LicenseService $licenseService): JsonResponse
+    public function update(UserRequest $request, User $user, LicenseService $licenseService): JsonResponse
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
+
         $establishmentUuidHeader = $request->header('X-Establishment-Uuid');
+        $currentUser = auth()->user();
 
         DB::beginTransaction();
         try {
-            $data = $request->except('password');
+            $data = $request->except(['password', 'is_super_admin', 'is_client', 'is_sub_user']);
+
             if ($request->filled('password')) {
                 $data['password'] = Hash::make($request->password);
             }
-            $data['updated_by'] = auth()->id();
+
+            if ($currentUser?->is_super_admin) {
+                $data['is_client'] = true;
+                $data['is_sub_user'] = false;
+            } elseif ($currentUser?->is_client) {
+                $data['is_client'] = false;
+                $data['is_sub_user'] = true;
+            }
+
+            $data['updated_by'] = $currentUser?->id;
+
             if ($establishmentUuidHeader && empty($data['establishment_uuid'])) {
                 $data['establishment_uuid'] = $establishmentUuidHeader;
             }
@@ -240,8 +267,8 @@ class UserController extends Controller
                 $user->roles()->detach();
                 foreach ($request->roles as $role) {
                     $user->roles()->attach($role, [
-                        'created_by' => auth()->id(),
-                        'updated_by' => auth()->id()
+                        'created_by' => $currentUser?->id,
+                        'updated_by' => $currentUser?->id,
                     ]);
                 }
             }
@@ -258,7 +285,9 @@ class UserController extends Controller
                             : $estData;
 
                         if ($estUuid) {
-                            $isDefault = is_array($estData) ? filter_var($estData['default'] ?? false, FILTER_VALIDATE_BOOLEAN) : false;
+                            $isDefault = is_array($estData)
+                                ? filter_var($estData['default'] ?? false, FILTER_VALIDATE_BOOLEAN)
+                                : false;
                             $newEstablishmentsData[$estUuid] = ['default' => $isDefault];
 
                             if ($isDefault) {
@@ -288,10 +317,10 @@ class UserController extends Controller
                         ],
                         [
                             'default'    => $attributes['default'],
-                            'updated_by' => auth()->id(),
+                            'updated_by' => $currentUser?->id,
                             'created_by' => \App\Models\UserEstablishment::where('user_id', $user->id)
                                     ->where('establishment_uuid', $uuid)
-                                    ->value('created_by') ?? auth()->id(),
+                                    ->value('created_by') ?? $currentUser?->id,
                         ]
                     );
                 }

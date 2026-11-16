@@ -12,42 +12,42 @@ class InitBDForAllDataSeeder extends Seeder
     public function run(): void
     {
         $defaultPassword = Hash::make('1234567');
+        $roleSuperAdmin = Role::updateOrCreate(
+            ['name' => 'SUPER_ADMIN', 'guard_name' => 'web'],
+            ['is_super_admin' => true, 'is_client' => false]
+        );
 
-        $roleAdmin  = Role::updateOrCreate(['name' => 'SUPER_ADMIN', 'guard_name' => 'web']);
-        $roleStaff  = Role::updateOrCreate(['name' => 'ESTHETICIENNE', 'guard_name' => 'web']);
-        $roleClient = Role::updateOrCreate(['name' => 'CLIENT', 'guard_name' => 'web']);
+        $roleClientAdmin = Role::updateOrCreate(
+            ['name' => 'ADMINISTRATEUR', 'guard_name' => 'web'],
+            ['is_super_admin' => false, 'is_client' => true]
+        );
 
-        $admin = User::updateOrCreate(
+        $superAdmin = User::updateOrCreate(
             ['login' => 'glow.admin'],
             [
                 'nom_utilisateur' => 'Gérante Glow Care',
                 'email'           => 'admin@glowcare.com',
                 'password'        => $defaultPassword,
-                'is_super_admin'  => true, // Uniquement pour le super admin
+                'is_super_admin'  => true,
+                'is_client'       => false,
+                'is_sub_user'     => false,
             ]
         );
-        $admin->syncRoles([$roleAdmin->name]);
+        $superAdmin->syncRoles([$roleSuperAdmin->name]);
 
-        $staff = User::updateOrCreate(
-            ['login' => 'glow.estheticienne'],
-            [
-                'nom_utilisateur' => 'Sarah Esthétique',
-                'email'           => 'sarah@glowcare.com',
-                'password'        => $defaultPassword,
-            ]
-        );
-        $staff->syncRoles([$roleStaff->name]);
-
-        $client = User::updateOrCreate(
+        $clientAdmin = User::updateOrCreate(
             ['login' => 'glow.client'],
             [
                 'nom_utilisateur' => 'Awa Marie',
                 'email'           => 'awa@glowcare.com',
                 'password'        => $defaultPassword,
+                'is_super_admin'  => false,
+                'is_client'       => true,
+                'is_sub_user'     => false,
             ]
         );
-        $client->syncRoles([$roleClient->name]);
+        $clientAdmin->syncRoles([$roleClientAdmin->name]);
 
-        $this->command->info('Seeder Glow Care : 3 utilisateurs créés avec succès !');
+        $this->command->info('Seeder Glow Care : 2 utilisateurs configurés avec succès !');
     }
 }

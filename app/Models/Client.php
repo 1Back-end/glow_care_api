@@ -6,6 +6,7 @@ use App\Enums\ClientStatus;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Support\Facades\DB;
@@ -37,14 +38,15 @@ class Client extends Model
         'code',
         'count_prestations',
         'position',
-        'establishment_uuid'
+        'establishment_uuid',
+        'user_id'
     ];
 
     protected $casts = [
         'birth_date' => 'date',
         'is_active' => 'boolean',
     ];
-    protected $appends = ['client_status', 'client_status_label','current_loyalty_reward'];
+    protected $appends = ['client_status', 'client_status_label','current_loyalty_reward','validity_card'];
     public static function boot()
     {
         parent::boot();
@@ -72,9 +74,33 @@ class Client extends Model
             });
         });
     }
+
+    public function getCountPrestationsAttribute(): int
+    {
+        return $this->invoices()
+            ->whereIn('regulated', [3, 2])
+            ->count();
+    }
+    protected function validityCard(): Attribute
+    {
+        return Attribute::make(
+            get: function () {
+                $fidelityCard = $this->fidelityCard()
+                    ->where('name', 'fidelityCard')
+                    ->latest()
+                    ->first();
+
+                if (!$fidelityCard) {
+                    return false;
+                }
+                $prestations = $this->count_prestations;
+                return $prestations > 0;
+            },
+        );
+    }
     public function getMatchedLoyaltyRule()
     {
-        $prestations = $this->count_prestations ?? 0;
+        $prestations = $this->count_prestations;
 
         if ($prestations <= 0) {
             return null;
@@ -89,10 +115,11 @@ class Client extends Model
     {
         return Attribute::make(
             get: function () {
-                $prestations = $this->count_prestations ?? 0;
+                $prestations = $this->count_prestations;
 
                 $minRule = LoyaltyRule::where('is_active', true)->min('required_prestations');
                 $maxRule = LoyaltyRule::where('is_active', true)->max('required_prestations');
+
                 if (!$minRule || $prestations < $minRule) {
                     return ClientStatus::RAS->value;
                 }
@@ -113,6 +140,26 @@ class Client extends Model
             }
         );
     }
+    protected function loyaltyMessage(): Attribute
+    {
+        return Attribute::make(
+            get: function () {
+                $clientName = $this->full_name ?? '';
+                $prestations = $this->count_prestations;
+                $matchedRule = $this->getMatchedLoyaltyRule();
+                if (!$matchedRule) {
+                    return "Bonsoir {$clientName}, merci d’être passé dans notre institut. Vous totalisez actuellement {$prestations} prestation(s).";
+                }
+                if ($prestations >= 20) {
+                    return "Bonsoir {$clientName}, merci d’être passé dans notre institut. Nous sommes heureux de vous annoncer qu’au bout de {$prestations} prestations, vous bénéficiez d’une prestation gratuite !";
+                } elseif ($prestations >= 10) {
+                    return "Bonsoir {$clientName}, merci d’être passé dans notre institut. Nous sommes heureux de vous annoncer qu’après {$prestations} prestations, vous bénéficiez d’une réduction sur vos prestations.";
+                }
+                return "Bonsoir {$clientName}, merci d’être passé dans notre institut.";
+            }
+        );
+    }
+
     protected function currentLoyaltyReward(): Attribute
     {
         return Attribute::make(
@@ -157,5 +204,17 @@ class Client extends Model
     public function establishment()
     {
         return $this->belongsTo(Establishment::class, 'establishment_uuid');
+    }
+    public function user()
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+    public function invoices()
+    {
+        return $this->hasMany(Invoice::class, 'client_uuid', 'uuid');
+    }
+    public function fidelityCard(): MorphMany
+    {
+        return $this->morphMany(Medias::class, 'mediable');
     }
 }

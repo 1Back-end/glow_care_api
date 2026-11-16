@@ -1,0 +1,25 @@
+databases:
+  - name: glow-care-db
+    database_name: glow_care_db
+    user: glowcare_user
+
+services:
+  - type: web
+    name: glowcare-api
+    env: php
+    plan: free
+    buildCommand: "composer install --no-dev --optimize-autoloader && php artisan config:cache && php artisan route:cache"
+    startCommand: "apache2-foreground"
+    envVars:
+      - key: APP_KEY
+        generateValue: true
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: false
+      - key: DB_CONNECTION
+        value: mysql
+      - key: DATABASE_URL
+        fromDatabase:
+          name: glow-care-db
+          property: connectionString

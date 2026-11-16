@@ -7,15 +7,20 @@ use App\Exports\ProductsExport;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\Establishment;
+use App\Models\User;
 use App\Models\UserEstablishment;
 use App\Services\LicenseService;
 use App\Services\UserAuthorizationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
+use Spatie\Browsershot\Exceptions\CouldNotTakeBrowsershot;
 use Symfony\Component\HttpFoundation\Response;
+use Throwable;
 
 /**
  * @permission_category Gestion des clients
@@ -85,13 +90,14 @@ class ClientController extends Controller
      * @permission ClientController::store
      * @permission_desc Créer un client
      */
-    public function store(Request $request,LicenseService $licenseService)
+    public function store(Request $request, LicenseService $licenseService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
+
         $auth = auth()->user();
-        $this->authService->denyIfSuperAdmin(auth()->user());
+        $this->authService->denyIfSuperAdmin($auth);
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
         $validatedData = $request->validate([
@@ -134,7 +140,29 @@ class ClientController extends Controller
             }
         }
 
+        $phone = $validatedData['phone'];
+        $email = $validatedData['email'] ?? null;
+        $password = \Illuminate\Support\Str::random(8);
+        $login = $phone;
+
+        $user = \App\Models\User::create([
+            'login'                 => $login,
+            'email'                 => $email,
+            'password'              => \Illuminate\Support\Facades\Hash::make($password),
+            'nom_utilisateur'       => $validatedData['full_name'],
+            'created_by'            => $auth?->id,
+            'updated_by'            => $auth?->id,
+        ]);
+
+        \App\Models\UserEstablishment::firstOrCreate([
+            'user_id'            => $user->id,
+            'establishment_uuid' => $establishmentUuid,
+        ], [
+            'default'            => true,
+        ]);
+
         $validatedData['establishment_uuid'] = $establishmentUuid;
+        $validatedData['user_id'] = $user?->id;
         $validatedData['created_by'] = $auth?->id;
 
         $client = Client::create($validatedData);
@@ -153,7 +181,8 @@ class ClientController extends Controller
         return response()->json([
             'status'  => true,
             'message' => 'Client créé avec succès',
-            'data'    => $client
+            'data'    => $client->load('user'),
+            'user'    => $user,
         ], 201);
     }
 
@@ -181,15 +210,12 @@ class ClientController extends Controller
      */
     public function update(Request $request, LicenseService $licenseService, $uuid)
     {
-
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
         }
 
         $auth = auth()->user();
-
         $this->authService->denyIfSuperAdmin($auth);
-
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
         $client = Client::where('establishment_uuid', $establishmentUuid)
@@ -239,6 +265,39 @@ class ClientController extends Controller
             }
         }
 
+        $phone = $validatedData['phone'];
+        $email = $validatedData['email'] ?? null;
+        $login = $phone;
+
+        if ($client->user) {
+            $client->user->update([
+                'login'           => $login,
+                'email'           => $email,
+                'nom_utilisateur' => $validatedData['full_name'],
+                'updated_by'      => $auth->id,
+            ]);
+        } else {
+            $password = \Illuminate\Support\Str::random(8);
+
+            $user = \App\Models\User::create([
+                'login'           => $login,
+                'email'           => $email,
+                'password'        => \Illuminate\Support\Facades\Hash::make($password),
+                'nom_utilisateur' => $validatedData['full_name'],
+                'created_by'      => $auth->id,
+                'updated_by'      => $auth->id,
+            ]);
+
+            $validatedData['user_id'] = $user->id;
+
+            \App\Models\UserEstablishment::firstOrCreate([
+                'user_id'            => $user->id,
+                'establishment_uuid' => $establishmentUuid,
+            ], [
+                'default'            => true,
+            ]);
+        }
+
         $validatedData['establishment_uuid'] = $establishmentUuid;
         $validatedData['updated_by'] = $auth->id;
         $client->update($validatedData);
@@ -257,7 +316,7 @@ class ClientController extends Controller
         return response()->json([
             'status'  => true,
             'message' => 'Client mis à jour avec succès',
-            'data'    => $client
+            'data'    => $client->load('user')
         ], 200);
     }
 
@@ -332,5 +391,75 @@ class ClientController extends Controller
                 "error" => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * @return JsonResponse
+     *
+     * @permission ClientController::printFidelityCard
+     * @permission_desc Imprimer une carte de fidélité pour un client
+     */
+    public function printFidelityCard(string $uuid, Request $request)
+    {
+        $client = Client::where('uuid', $uuid)->firstOrFail();
+
+        $oldFidelityCard = $client->fidelityCard()->latest()->first();
+        if ($oldFidelityCard) {
+            Storage::disk('public')->delete($oldFidelityCard->path);
+            $oldFidelityCard->delete();
+        }
+
+        $establishment = $client->establishment;
+        $media = $establishment?->medias()->where('name', 'logo')->first();
+        $validityDays = intval($request->input('validity', 365));
+
+        $data = [
+            'validity' => $validityDays,
+            'client' => $client,
+            'establishment' => $establishment,
+            'logo' => ($media && file_exists(storage_path('app/public/' . $media->path . '/' . $media->filename)))
+                ? base64_encode(file_get_contents(storage_path('app/public/' . $media->path . '/' . $media->filename)))
+                : ($establishment?->public_logo ? @base64_encode(@file_get_contents(public_path($establishment->public_logo))) : ''),
+            'mimetype' => $media ? $media->mimetype : 'image/png',
+        ];
+
+        $identifier = $client->code ?? $client->uuid;
+        $folder = 'storage/fidelity-card';
+        $fileName = $identifier . '.pdf';
+        $fullPath = $folder . '/' . $fileName;
+
+        try {
+            save_browser_shot_pdf(
+                view: 'pdfs.fidelity-cart',
+                data: $data,
+                folderPath: $folder,
+                path: $fullPath,
+                format: 'a6',
+                direction: 'landscape'
+            );
+        } catch (CouldNotTakeBrowsershot | Throwable $e) {
+            Log::error($e->getMessage());
+
+            return \response()->json([
+                'message' => __("Une erreur inattendue est survenue.")
+            ], 400);
+        }
+
+        $path = 'fidelity-card/' . $fileName;
+
+        $client->fidelityCard()->create([
+            'name' => "fidelityCard",
+            'disk' => 'public',
+            'path' => $path,
+            'filename' => $fileName,
+            'mimetype' => 'pdf',
+            'extension' => 'pdf',
+            'validity' => $validityDays,
+            'created_by' => auth()->id(),
+        ]);
+
+        return \response()->json([
+            'url' => Storage::disk('public')->url($path)
+        ]);
     }
 }
