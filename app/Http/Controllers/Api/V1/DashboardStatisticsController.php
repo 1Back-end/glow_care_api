@@ -31,13 +31,6 @@ class DashboardStatisticsController extends Controller
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
-
         $totalClients = Client::where('establishment_uuid', $establishmentUuid)->count();
 
         $clientsLastMonth = Client::where('establishment_uuid', $establishmentUuid)
@@ -87,13 +80,6 @@ class DashboardStatisticsController extends Controller
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
-
         $totalAppointments = Appointment::where('establishment_uuid', $establishmentUuid)->count();
 
         $pendingAppointments = Appointment::where('establishment_uuid', $establishmentUuid)
@@ -139,13 +125,6 @@ class DashboardStatisticsController extends Controller
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
-
         $baseQuery = Invoice::where('establishment_uuid', $establishmentUuid);
 
         $totalInvoices = (clone $baseQuery)->count();
@@ -177,13 +156,6 @@ class DashboardStatisticsController extends Controller
     public function getRevenueEvolution(Request $request)
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
-
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
 
         $period = $request->query('period', '30d');
         [$unit, $count] = match ($period) {
@@ -274,13 +246,6 @@ class DashboardStatisticsController extends Controller
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
-
         $start = match ($request->query('period', '30d')) {
             '7d'    => now()->subDays(6)->startOfDay(),
             '3m'    => now()->subMonths(3)->startOfDay(),
@@ -347,13 +312,6 @@ class DashboardStatisticsController extends Controller
     public function getAverageBasketStats(Request $request)
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
-
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Établissement non spécifié.'
-            ], 400);
-        }
 
         $paidInvoices = Invoice::with('items')
             ->where('establishment_uuid', $establishmentUuid)
