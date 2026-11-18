@@ -231,6 +231,7 @@ class SubscriptionRequestController extends Controller
 
         $reason = $request->input('reason');
         $userId = auth()->id();
+        $plainOtp = null;
 
         $data = [
             'status' => $newStatus,
@@ -297,7 +298,7 @@ class SubscriptionRequestController extends Controller
             }
         }
 
-        $notification = new SubscriptionRequestStatusUpdatedNotification($subscriptionRequest, $newStatus, $reason);
+        $notification = new SubscriptionRequestStatusUpdatedNotification($subscriptionRequest, $newStatus, $reason, $plainOtp);
 
         if ($subscriptionRequest->creator) {
             $subscriptionRequest->creator->notify($notification);

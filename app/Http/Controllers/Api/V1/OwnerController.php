@@ -86,7 +86,7 @@ class OwnerController extends Controller
             DB::beginTransaction();
 
             $email = $validated['email'] ?? null;
-            $password = \Illuminate\Support\Str::random(8);
+            $password = '1234567@2026';
             $login = $email ?? $validated['phone'];
 
             $user = User::create([
@@ -96,6 +96,7 @@ class OwnerController extends Controller
                 'nom_utilisateur'       => $validated['full_name'],
                 'created_by'            => auth()->id(),
                 'updated_by'            => auth()->id(),
+                'is_client'             => true,
             ]);
 
             $owner = Owner::create([

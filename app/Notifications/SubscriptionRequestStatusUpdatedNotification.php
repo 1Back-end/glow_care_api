@@ -3,6 +3,7 @@
 namespace App\Notifications;
 
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Notification;
 
 class SubscriptionRequestStatusUpdatedNotification extends Notification
@@ -12,12 +13,14 @@ class SubscriptionRequestStatusUpdatedNotification extends Notification
     protected $subscriptionRequest;
     protected $status;
     protected $reason;
+    protected $otp;
 
-    public function __construct($subscriptionRequest, $status, $reason = null)
+    public function __construct($subscriptionRequest, $status, $reason = null, $otp = null)
     {
         $this->subscriptionRequest = $subscriptionRequest;
         $this->status = $status;
         $this->reason = $reason;
+        $this->otp = $otp;
     }
 
     public function via($notifiable): array
@@ -30,7 +33,7 @@ class SubscriptionRequestStatusUpdatedNotification extends Notification
         $establishmentName = $this->subscriptionRequest->establishment->name ?? "l'établissement";
 
         $message = match ($this->status) {
-            'validated', 'VALIDATED' => "Votre demande d'abonnement pour {$establishmentName} a été approuvée.",
+            'validated', 'VALIDATED' => "Votre demande d'abonnement pour {$establishmentName} a été approuvée. Votre code d'activation OTP est : {$this->otp}",
             'rejected' => "Votre demande d'abonnement pour {$establishmentName} a été rejetée. Motif : {$this->reason}",
             'cancelled' => "Votre demande d'abonnement pour {$establishmentName} a été annulée. Motif : {$this->reason}",
             default => "Le statut de votre demande d'abonnement pour {$establishmentName} a été mis à jour."
@@ -41,6 +44,7 @@ class SubscriptionRequestStatusUpdatedNotification extends Notification
             'establishment_name' => $this->subscriptionRequest->establishment->name ?? null,
             'message' => $message,
             'status' => $this->status,
+            'otp' => $this->otp,
         ];
     }
 }

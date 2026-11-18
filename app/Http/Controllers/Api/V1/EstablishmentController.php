@@ -8,6 +8,8 @@ use App\Models\Client;
 use App\Models\Establishment;
 use App\Models\EstablishmentActivation;
 use App\Models\EstablishmentAvailabilityDay;
+use App\Models\Owner;
+use App\Models\UserEstablishment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -122,6 +124,18 @@ class EstablishmentController extends Controller
                 'updated_by'      => auth()->id(),
             ]);
 
+            $owner = Owner::where('uuid', $validated['owner_uuid'])->first();
+
+            if ($owner && $owner->user_id) {
+                $existingCount = UserEstablishment::where('user_id', $owner->user_id)->count();
+                UserEstablishment::create([
+                    'user_id'            => $owner->user_id,
+                    'establishment_uuid' => $establishment->uuid,
+                    'default'            => $existingCount === 0 ? true : false,
+                    'sequence'           => $existingCount + 1,
+                ]);
+            }
+
             if ($request->hasFile('logo')) {
                 $file = $request->file('logo');
                 $filename = time() . '_logo_' . $file->getClientOriginalName();
@@ -230,6 +244,7 @@ class EstablishmentController extends Controller
             DB::beginTransaction();
 
             $newLicenseUuid = $validated['license_uuid'] ?? null;
+            $oldOwnerUuid = $establishment->owner_uuid;
 
             $establishment->update([
                 'name'            => $validated['name'],
@@ -245,6 +260,20 @@ class EstablishmentController extends Controller
                 'is_active'       => $request->boolean('is_active', $establishment->is_active),
                 'updated_by'      => auth()->id(),
             ]);
+
+            if ($oldOwnerUuid !== $validated['owner_uuid']) {
+                UserEstablishment::where('establishment_uuid', $establishment->uuid)->delete();
+                $newOwner = Owner::where('uuid', $validated['owner_uuid'])->first();
+                if ($newOwner && $newOwner->user_id) {
+                    $existingCount = UserEstablishment::where('user_id', $newOwner->user_id)->count();
+                    UserEstablishment::create([
+                        'user_id'            => $newOwner->user_id,
+                        'establishment_uuid' => $establishment->uuid,
+                        'default'            => $existingCount === 0 ? true : false,
+                        'sequence'           => $existingCount + 1,
+                    ]);
+                }
+            }
 
             if ($request->hasFile('logo')) {
                 if ($establishment->logo && \Illuminate\Support\Facades\Storage::disk('public')->exists($establishment->logo)) {

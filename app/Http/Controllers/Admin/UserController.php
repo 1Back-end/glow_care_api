@@ -114,7 +114,7 @@ class UserController extends Controller
 
         DB::beginTransaction();
         try {
-            $defaultPassword = '1234567';
+            $defaultPassword = '1234567@2026';
 
             $isClient = (bool) ($currentUser?->is_super_admin ?? false);
             $isSubUser = !$isClient && (bool) ($currentUser?->is_client ?? false);

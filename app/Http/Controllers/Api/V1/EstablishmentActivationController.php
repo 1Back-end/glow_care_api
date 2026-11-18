@@ -98,6 +98,7 @@ class EstablishmentActivationController extends Controller
             $establishment = Establishment::where('uuid', $establishmentUuid)->first();
             if ($establishment) {
                 $establishment->update([
+                    'license_uuid'    => $activation->license_uuid,
                     'is_used_licence' => true,
                 ]);
             }
