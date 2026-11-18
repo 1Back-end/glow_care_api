@@ -59,17 +59,9 @@ return [
             'prefix_indexes' => true,
             'strict' => true,
             'engine' => null,
-            'options' => array_merge(
-                [
-                    PDO::ATTR_PERSISTENT => false,
-                    PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
-                    PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => false,
-                    PDO::ATTR_TIMEOUT => 30,
-                ],
-                extension_loaded('pdo_mysql') && defined('PDO::MYSQL_ATTR_SSL_CA') && env('MYSQL_ATTR_SSL_CA')
-                    ? [PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA')]
-                    : []
-            ),
+            'options' => extension_loaded('pdo_mysql') ? array_filter([
+                PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+            ]) : [],
         ],
 
         'mariadb' => [
