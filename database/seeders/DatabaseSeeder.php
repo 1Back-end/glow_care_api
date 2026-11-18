@@ -14,12 +14,6 @@ class DatabaseSeeder extends Seeder
         $this->call([
             InitBDForAllDataSeeder::class,
             CountriesTableSeeder::class,
-            ClientSeeder::class,
-            LoyaltyRuleSeeder::class,
-            EstablishmentSeeder::class,
-            OwnerSeeder::class,
-            PrestationSeeder::class,
-            AppointmentSeeder::class,
         ]);
     }
 }

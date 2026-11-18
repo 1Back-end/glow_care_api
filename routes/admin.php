@@ -1,6 +1,4 @@
 <?php
-
-// User Management
 use App\Http\Controllers\Admin\UserController;
 
 Route::middleware(['auth:sanctum', 'user.change_password', 'check.permission'])->prefix('admin')->group(function () {
