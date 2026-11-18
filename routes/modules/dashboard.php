@@ -7,3 +7,4 @@ Route::get('/dashboard/invoices-stats', [\App\Http\Controllers\Api\V1\DashboardS
 Route::get('/dashboard/invoices-variation', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'getRevenueEvolution']);
 Route::get('/dashboard/top-prestations', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'getTopPrestations']);
 Route::get('/dashboard/average-basket-stats', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'getAverageBasketStats']);
+Route::get('/dashboard/appointments-today', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'today']);

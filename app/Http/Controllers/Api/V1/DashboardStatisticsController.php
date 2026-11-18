@@ -14,6 +14,9 @@ use App\Services\LicenseService;
 use Carbon\CarbonInterface;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Symfony\Component\HttpFoundation\Response;
+
 /**
  * @permission_category Gestion des statistiques
  */
@@ -348,5 +351,49 @@ class DashboardStatisticsController extends Controller
                 'growth'         => $growthRate,
             ]
         ]);
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::today
+     * @permission_desc Afficher les rendez-vous du jour
+     */
+    public function today(Request $request)
+    {
+        $establishmentUuid = $request->header('X-Establishment-Uuid');
+
+        if (empty($establishmentUuid)) {
+            return response()->json([
+                'status'  => false,
+                'message' => 'L’en-tête X-Establishment-Uuid est manquant.',
+            ], Response::HTTP_BAD_REQUEST);
+        }
+
+        try {
+            $todayStart = Carbon::today()->startOfDay();
+            $todayEnd = Carbon::today()->endOfDay();
+
+            $appointments = Appointment::with(['client:uuid,full_name', 'prestation:uuid,name'])
+                ->where('establishment_uuid', $establishmentUuid)
+                ->whereBetween('date_rdv', [$todayStart, $todayEnd])
+                ->orderBy('date_rdv', 'asc')
+                ->take(10)
+                ->get();
+
+            return response()->json([
+                'status'  => true,
+                'message' => 'Rendez-vous du jour récupérés avec succès.',
+                'data'    => $appointments,
+            ], Response::HTTP_OK);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status'  => false,
+                'message' => 'Erreur lors de la récupération des rendez-vous.',
+                'error'   => $e->getMessage(),
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
     }
 }
