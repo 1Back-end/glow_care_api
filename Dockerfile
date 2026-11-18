@@ -11,8 +11,10 @@ RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-av
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 COPY . .
+
 RUN composer install --no-dev --optimize-autoloader \
-    && chown -R www-data:www-data storage bootstrap/cache
+    && chown -R www-data:www-data /var/www/html \
+    && chmod -R 775 storage bootstrap/cache
 
 COPY docker-start.sh /docker-start.sh
 RUN chmod +x /docker-start.sh
