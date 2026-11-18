@@ -13,12 +13,13 @@ php artisan route:cache
 # Migrations
 php artisan migrate --force
 
-# Seeder : seulement si RUN_SEED=true dans les variables Render
+# Seeder, puis extraction des permissions (seulement si RUN_SEED=true)
 if [ "$RUN_SEED" = "true" ]; then
     php artisan db:seed --force
+    php artisan permission:extract || echo "permission:extract a échoué, voir les logs ci-dessus"
 fi
 
-# Permissions APRÈS toutes les commandes artisan
+# Permissions des dossiers APRÈS toutes les commandes artisan
 chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
