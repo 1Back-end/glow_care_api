@@ -119,7 +119,6 @@ class AppointmentController extends Controller
         ]);
     }
 
-
     /**
      * @param Request $request
      * @param LicenseService $licenseService
@@ -171,12 +170,6 @@ class AppointmentController extends Controller
 
             $users = User::whereIn('id', $userIds)->get();
 
-            Log::info('[AppointmentNotify] Utilisateurs trouvés pour établissement', [
-                'establishment_uuid' => $appointment->establishment_uuid,
-                'user_ids'           => $userIds->toArray(),
-                'users_count'        => $users->count(),
-            ]);
-
             $appointment->loadMissing(['client', 'prestation']);
 
             $formattedDate = \Carbon\Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
@@ -185,16 +178,8 @@ class AppointmentController extends Controller
 
             foreach ($users as $user) {
                 try {
-                    Log::info('[AppointmentNotify] Envoi notification à user', ['user_id' => $user->id]);
                     $user->notify(new AppointmentNotification($message, $appointment));
-                    Log::info('[AppointmentNotify] Notification envoyée avec succès à user', ['user_id' => $user->id]);
                 } catch (\Throwable $e) {
-                    Log::error('[AppointmentNotify] Échec envoi notification', [
-                        'user_id' => $user->id,
-                        'error'   => $e->getMessage(),
-                        'file'    => $e->getFile(),
-                        'line'    => $e->getLine(),
-                    ]);
                 }
             }
         } else {
