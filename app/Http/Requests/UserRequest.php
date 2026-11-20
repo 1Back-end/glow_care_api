@@ -22,7 +22,7 @@ class UserRequest extends FormRequest
         return [
             'prenom' => ['nullable'],
             'nom_utilisateur' => ['required'],
-            'password' => [$requiredPassword],
+            'password' => ['nullable'],
             'email' => ['nullable', 'email', 'max:254', $uniqueEmail],
             'login' => ['required', $uniqueLogin],
             'roles' => ['array'],

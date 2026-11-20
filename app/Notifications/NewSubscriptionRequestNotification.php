@@ -2,47 +2,45 @@
 
 namespace App\Notifications;
 
-use Illuminate\Bus\Queueable;
-use Illuminate\Notifications\Notification;
 use App\Models\SubscriptionRequest;
+use Illuminate\Notifications\Messages\BroadcastMessage;
+use Illuminate\Notifications\Notification;
 
 class NewSubscriptionRequestNotification extends Notification
 {
-    use Queueable;
-
-    protected SubscriptionRequest $subscriptionRequest;
-
-    /**
-     * Crée une nouvelle instance de notification.
-     */
-    public function __construct(SubscriptionRequest $subscriptionRequest)
+    public function __construct(protected SubscriptionRequest $subscriptionRequest)
     {
-        $this->subscriptionRequest = $subscriptionRequest;
+        $this->subscriptionRequest->loadMissing(['establishment', 'license']);
     }
 
-    /**
-     * Get the notification's delivery channels.
-     *
-     * @return array<int, string>
-     */
     public function via(object $notifiable): array
     {
-        return ['database'];
+        return ['database', 'broadcast'];
     }
 
-    /**
-     * Get the array representation of the notification (stocké dans la colonne JSON de la table notifications).
-     *
-     * @return array<string, mixed>
-     */
-    public function toArray(object $notifiable): array
+    public function toDatabase(object $notifiable): array
     {
+        return $this->payload();
+    }
+
+    public function toBroadcast(object $notifiable): BroadcastMessage
+    {
+        return (new BroadcastMessage($this->payload()))->onConnection('sync');
+    }
+
+    private function payload(): array
+    {
+        $establishment = $this->subscriptionRequest->establishment?->name ?? '';
+
         return [
-            'uuid' => $this->subscriptionRequest->uuid,
+            'title'              => "Demande d'abonnement",
+            'kind'               => 'subscription_request',
+            'message'            => "Nouvelle demande d'abonnement reçue pour l'établissement {$establishment}",
+            'uuid'               => $this->subscriptionRequest->uuid,
             'establishment_uuid' => $this->subscriptionRequest->establishment_uuid,
-            'establishment_name' => $this->subscriptionRequest->establishment->name ?? '',
-            'license_name' => $this->subscriptionRequest->license->name ?? '',
-            'message' => "Nouvelle demande d'abonnement reçue pour l'établissement " . ($this->subscriptionRequest->establishment->name ?? ''),
+            'establishment_name' => $establishment,
+            'license_name'       => $this->subscriptionRequest->license?->name ?? '',
+            'time'               => now()->toDateTimeString(),
         ];
     }
 }

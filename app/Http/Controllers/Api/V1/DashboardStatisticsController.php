@@ -10,6 +10,7 @@ use App\Models\Client;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Owner;
+use App\Models\Prestation;
 use App\Services\LicenseService;
 use Carbon\CarbonInterface;
 use Illuminate\Http\JsonResponse;
@@ -364,13 +365,6 @@ class DashboardStatisticsController extends Controller
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (empty($establishmentUuid)) {
-            return response()->json([
-                'status'  => false,
-                'message' => 'L’en-tête X-Establishment-Uuid est manquant.',
-            ], Response::HTTP_BAD_REQUEST);
-        }
-
         try {
             $todayStart = Carbon::today()->startOfDay();
             $todayEnd = Carbon::today()->endOfDay();
@@ -395,5 +389,149 @@ class DashboardStatisticsController extends Controller
                 'error'   => $e->getMessage(),
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::RecentActivity
+     * @permission_desc Afficher les activités récentes
+     */
+    public function RecentActivity(Request $request): JsonResponse
+    {
+        $establishmentUuid = $request->header('X-Establishment-Uuid');
+        $limit = max(1, min((int) $request->get('limit', 5), 30));
+        $maxAppointments = 2;
+
+        if (!$establishmentUuid) {
+            return response()->json([
+                'status'  => false,
+                'message' => 'En-tête X-Establishment-Uuid manquant.',
+                'data'    => [],
+            ], 422);
+        }
+
+        // 1. Clients récents (priorité 1)
+        $clients = Client::where('establishment_uuid', $establishmentUuid)
+            ->latest('created_at')
+            ->take($limit)
+            ->get()
+            ->map(function (Client $client) {
+                $createdAt = Carbon::parse($client->created_at);
+                $clientName = $client->full_name ?: 'Client';
+
+                return [
+                    'uuid'       => 'client-' . $client->uuid,
+                    'type'       => 'client',
+                    'priority'   => 1,
+                    'title'      => 'Nouveau client',
+                    'subtitle'   => "Nom : {$clientName}",
+                    'time_label' => $createdAt->format('H\hi'),
+                    'timestamp'  => $createdAt->toIso8601String(),
+                    'sort_ts'    => $createdAt->timestamp,
+                    'route_uuid' => $client->uuid,
+                ];
+            });
+
+        // 2. Rendez-vous récents — maximum 2 (priorité 2)
+        $appointments = Appointment::with(['client:uuid,full_name', 'prestation:uuid,name'])
+            ->where('establishment_uuid', $establishmentUuid)
+            ->latest('created_at')
+            ->take($maxAppointments)
+            ->get()
+            ->map(function (Appointment $appointment) {
+                $createdAt = Carbon::parse($appointment->created_at);
+                $clientName = $appointment->client?->full_name ?: 'Client';
+
+                return [
+                    'uuid'       => 'appointment-' . $appointment->uuid,
+                    'type'       => 'appointment',
+                    'priority'   => 2,
+                    'title'      => $appointment->title ?: 'Nouveau rendez-vous',
+                    'subtitle'   => "Client : {$clientName}",
+                    'time_label' => $createdAt->format('H\hi'),
+                    'timestamp'  => $createdAt->toIso8601String(),
+                    'sort_ts'    => $createdAt->timestamp,
+                    'route_uuid' => $appointment->uuid,
+                ];
+            });
+
+        // 3. Prestations récentes (priorité 3)
+        $prestations = Prestation::where('establishment_uuid', $establishmentUuid)
+            ->latest('created_at')
+            ->take($limit)
+            ->get()
+            ->map(function (Prestation $prestation) {
+                $createdAt = Carbon::parse($prestation->created_at);
+                $prestationName = $prestation->name ?: 'Prestation';
+
+                return [
+                    'uuid'       => 'prestation-' . $prestation->uuid,
+                    'type'       => 'prestation',
+                    'priority'   => 3,
+                    'title'      => 'Nouvelle prestation',
+                    'subtitle'   => "Prestation : {$prestationName}",
+                    'time_label' => $createdAt->format('H\hi'),
+                    'timestamp'  => $createdAt->toIso8601String(),
+                    'sort_ts'    => $createdAt->timestamp,
+                    'route_uuid' => $prestation->uuid,
+                ];
+            });
+
+        $invoices = Invoice::with(['client:uuid,full_name'])
+            ->where('establishment_uuid', $establishmentUuid)
+            ->latest('created_at')
+            ->take($limit)
+            ->get()
+            ->map(function (Invoice $invoice) {
+                $createdAt = Carbon::parse($invoice->created_at);
+                $clientName = $invoice->client?->full_name;
+                $stateLabel = $invoice->regulated instanceof \BackedEnum
+                    ? $invoice->regulated->value
+                    : ($invoice->regulated?->name ?? null);
+
+                $subtitle = $clientName
+                    ? "Client : {$clientName}"
+                    : ($invoice->code ? "Réf : {$invoice->code}" : 'Facture');
+
+                if ($stateLabel) {
+                    $subtitle .= " ({$stateLabel})";
+                }
+
+                return [
+                    'uuid'       => 'invoice-' . $invoice->uuid,
+                    'type'       => 'invoice',
+                    'priority'   => 4,
+                    'title'      => 'Facture',
+                    'subtitle'   => $subtitle,
+                    'time_label' => $createdAt->format('H\hi'),
+                    'timestamp'  => $createdAt->toIso8601String(),
+                    'sort_ts'    => $createdAt->timestamp,
+                    'route_uuid' => $invoice->uuid,
+                ];
+            });
+
+        $activities = $clients
+            ->concat($appointments)
+            ->concat($prestations)
+            ->concat($invoices)
+            ->sort(function ($a, $b) {
+                if ($a['sort_ts'] === $b['sort_ts']) {
+                    return $a['priority'] <=> $b['priority'];
+                }
+                return $b['sort_ts'] <=> $a['sort_ts'];
+            })
+            ->take($limit)
+            ->map(function ($item) {
+                unset($item['sort_ts'], $item['priority']);
+                return $item;
+            })
+            ->values();
+
+        return response()->json([
+            'status' => true,
+            'data'   => $activities,
+        ]);
     }
 }

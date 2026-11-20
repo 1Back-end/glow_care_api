@@ -15,14 +15,21 @@ use Illuminate\Http\Request;
 
 class NotificationController extends Controller
 {
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission NotificationController::index
+     * @permission_desc Afficher la liste des notifications
+     */
     public function index(Request $request): JsonResponse
     {
         $user = auth()->user();
 
         if ($user->is_super_admin) {
-            $notifications = \Illuminate\Notifications\DatabaseNotification::latest()->paginate(10);
+            $notifications = \Illuminate\Notifications\DatabaseNotification::latest()->paginate(100);
         } else {
-            $notifications = $user->notifications()->paginate(10);
+            $notifications = $user->notifications()->paginate(100);
         }
 
         return response()->json([
@@ -37,7 +44,11 @@ class NotificationController extends Controller
     }
 
     /**
-     * Marque une notification spécifique comme lue par son ID.
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission NotificationController::markAsRead
+     * @permission_desc Marquer une notification spécifique comme lue
      */
     public function markAsRead($id)
     {
@@ -61,8 +72,13 @@ class NotificationController extends Controller
         ]);
     }
 
+
     /**
-     * Marque toutes les notifications de l'utilisateur comme lues.
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission NotificationController::markAllAsRead
+     * @permission_desc Marquer toutes les notifications de l'utilisateur comme lues.
      */
     public function markAllAsRead()
     {
@@ -75,7 +91,11 @@ class NotificationController extends Controller
     }
 
     /**
-     * Supprime une notification spécifique.
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission NotificationController::destroy
+     * @permission_desc Supprimer une notification spécifique.
      */
     public function destroy($id)
     {

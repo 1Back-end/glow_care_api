@@ -18,6 +18,8 @@ use App\Services\UserAuthorizationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Notification;
 
 /**
  * @permission_category Gestion des rendez vous
@@ -169,13 +171,36 @@ class AppointmentController extends Controller
 
             $users = User::whereIn('id', $userIds)->get();
 
+            Log::info('[AppointmentNotify] Utilisateurs trouvés pour établissement', [
+                'establishment_uuid' => $appointment->establishment_uuid,
+                'user_ids'           => $userIds->toArray(),
+                'users_count'        => $users->count(),
+            ]);
+
+            $appointment->loadMissing(['client', 'prestation']);
+
             $formattedDate = \Carbon\Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
 
             $message = "Nouveau rendez-vous : {$appointment->client?->full_name} pour la prestation « {$appointment->prestation?->name} » prévue le {$formattedDate}.";
 
             foreach ($users as $user) {
-                $user->notify(new AppointmentNotification($message, $appointment));
+                try {
+                    Log::info('[AppointmentNotify] Envoi notification à user', ['user_id' => $user->id]);
+                    $user->notify(new AppointmentNotification($message, $appointment));
+                    Log::info('[AppointmentNotify] Notification envoyée avec succès à user', ['user_id' => $user->id]);
+                } catch (\Throwable $e) {
+                    Log::error('[AppointmentNotify] Échec envoi notification', [
+                        'user_id' => $user->id,
+                        'error'   => $e->getMessage(),
+                        'file'    => $e->getFile(),
+                        'line'    => $e->getLine(),
+                    ]);
+                }
             }
+        } else {
+            Log::warning('[AppointmentNotify] appointment->establishment_uuid est vide ou null', [
+                'appointment_uuid' => $appointment->uuid ?? null,
+            ]);
         }
 
         return response()->json([
@@ -225,15 +250,23 @@ class AppointmentController extends Controller
         $appointment->load(['client:uuid,code,full_name', 'prestation','validator:id,nom_utilisateur', 'creator:id,nom_utilisateur', 'updater:id,nom_utilisateur','rejector:id,nom_utilisateur']);
 
         if ($appointment->establishment_uuid) {
-            $userIds = UserEstablishment::where('establishment_uuid', $appointment->establishment_uuid)
-                ->pluck('user_id');
+            $users = User::whereIn(
+                'id',
+                UserEstablishment::where('establishment_uuid', $appointment->establishment_uuid)->select('user_id')
+            )->get();
 
-            $users = User::whereIn('id', $userIds)->get();
-            $formattedDate = \Carbon\Carbon::parse($appointment->date_rdv)->format('d M Y à H:i');
-            $message = "Rendez-vous modifié : {$appointment->client?->full_name} pour la prestation « {$appointment->prestation?->name} » prévue le {$formattedDate}.";
+            if ($users->isNotEmpty()) {
+                $date = \Carbon\Carbon::parse($appointment->date_rdv)->locale('fr')->translatedFormat('d F Y à H:i');
 
-            foreach ($users as $user) {
-                $user->notify(new AppointmentNotification($message, $appointment));
+                $message = "Rendez-vous modifié : {$appointment->client?->full_name} "
+                    . "pour la prestation « {$appointment->prestation?->name} » "
+                    . "prévue le {$date}.";
+
+                try {
+                    Notification::send($users, new AppointmentNotification($message, $appointment));
+                } catch (\Throwable $e) {
+                    Log::error('Échec notification rendez-vous', ['error' => $e->getMessage()]);
+                }
             }
         }
 

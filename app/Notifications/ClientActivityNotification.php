@@ -2,36 +2,36 @@
 
 namespace App\Notifications;
 
-use Illuminate\Bus\Queueable;
+use Illuminate\Notifications\Messages\BroadcastMessage;
 use Illuminate\Notifications\Notification;
 
 class ClientActivityNotification extends Notification
 {
-    use Queueable;
-
-    /**
-     * Crée une nouvelle instance de notification.
-     */
     public function __construct(
         protected string $actionMessage,
         protected $client
     ) {}
 
-    /**
-     * Détermine les canaux par lesquels la notification sera envoyée.
-     * Ici, on utilise 'database' pour la stocker en base de données.
-     */
-    public function via($notifiable): array
+    public function via(object $notifiable): array
     {
-        return ['database'];
+        return ['database', 'broadcast'];
     }
 
-    /**
-     * Données qui seront enregistrées au format JSON dans la table `notifications`.
-     */
-    public function toDatabase($notifiable): array
+    public function toDatabase(object $notifiable): array
+    {
+        return $this->payload();
+    }
+
+    public function toBroadcast(object $notifiable): BroadcastMessage
+    {
+        return (new BroadcastMessage($this->payload()))->onConnection('sync');
+    }
+
+    private function payload(): array
     {
         return [
+            'title'       => 'Activité client',
+            'kind'        => 'client_activity',
             'message'     => $this->actionMessage,
             'client_uuid' => $this->client->uuid ?? null,
             'client_name' => $this->client->full_name ?? null,
