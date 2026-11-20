@@ -1,6 +1,12 @@
 FROM php:8.3-apache
 
-RUN apt-get update && apt-get install -y git unzip ca-certificates libzip-dev libpng-dev libonig-dev \
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    ca-certificates \
+    libzip-dev \
+    libpng-dev \
+    libonig-dev \
     && docker-php-ext-install pdo_mysql zip gd mbstring bcmath \
     && a2enmod rewrite \
     && echo "ServerName localhost" >> /etc/apache2/apache2.conf \
@@ -17,7 +23,6 @@ COPY . .
 
 RUN composer install --no-dev --optimize-autoloader --no-interaction \
     && mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
-    && php artisan storage:link \
     && chown -R www-data:www-data /var/www/html \
     && chmod -R 775 storage bootstrap/cache
 
