@@ -397,28 +397,13 @@ class CashRegisterController extends Controller
 
     public function getByUserAndEstablishment(Request $request): JsonResponse
     {
-        $establishmentUuid = $request->input('establishment_uuid')
-            ?? $request->header('X-Establishment-Uuid');
+        $establishmentUuid = $request->header('X-Establishment-Uuid');
 
-        if (empty($establishmentUuid)) {
-            return response()->json([
-                'status'  => false,
-                'message' => "L'identifiant de l'établissement (establishment_uuid ou X-Establishment-Uuid) est requis.",
-            ], 422);
-        }
-
-        $userId = $request->input('user_id') ?? auth()->id();
-
-        if (empty($userId)) {
-            return response()->json([
-                'status'  => false,
-                'message' => "L'identifiant de l'utilisateur (user_id) est requis.",
-            ], 422);
-        }
+        $auth = auth()->user();
 
         $cashRegister = CashRegister::with(['establishment:uuid,name', 'user:id,nom_utilisateur,login'])
             ->where('establishment_uuid', $establishmentUuid)
-            ->where('user_id', $userId)
+            ->where('user_id', $auth->id)
             ->where('is_active', true)
             ->first();
 
