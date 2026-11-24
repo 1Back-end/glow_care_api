@@ -29,6 +29,7 @@ class InvoiceItem extends Model
         'remise',
         'created_by',
         'updated_by',
+        'cash_register_uuid',
     ];
 
     protected $casts = [
@@ -99,5 +100,9 @@ class InvoiceItem extends Model
     public function updater()
     {
         return $this->belongsTo(User::class, 'updated_by');
+    }
+    public function cashRegister()
+    {
+        return $this->belongsTo(CashRegister::class, 'cash_register_uuid', 'uuid');
     }
 }

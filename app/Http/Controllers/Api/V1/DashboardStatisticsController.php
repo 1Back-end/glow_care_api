@@ -6,10 +6,12 @@ use App\Enums\AppointmentStatus;
 use App\Enums\StateFacture;
 use App\Http\Controllers\Controller;
 use App\Models\Appointment;
+use App\Models\CashRegister;
 use App\Models\Client;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Owner;
+use App\Models\Payment;
 use App\Models\Prestation;
 use App\Services\LicenseService;
 use Carbon\CarbonInterface;
@@ -147,6 +149,89 @@ class DashboardStatisticsController extends Controller
                 'total'  => $totalInvoices,
                 'growth' => $growthRate,
             ]
+        ]);
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::getPaymentsByRegulationMethod
+     * @permission_desc Afficher les paiements par mode de règlements
+     */
+    public function getPaymentsByRegulationMethod(Request $request)
+    {
+        $auth = auth()->user();
+
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $auth->establishment_uuid;
+
+        $rows = Payment::query()
+            ->leftJoin('regulation_methods', 'payments.regulation_methods_uuid', '=', 'regulation_methods.uuid')
+            ->where('payments.establishment_uuid', $establishmentUuid)
+            ->where('payments.status', '!=', 'cancelled')
+            ->selectRaw("
+            COALESCE(regulation_methods.uuid, 'unknown') as method_uuid,
+            COALESCE(regulation_methods.name, 'Non défini') as label,
+            COALESCE(regulation_methods.code, '') as code,
+            COUNT(payments.uuid) as count,
+            COALESCE(SUM(payments.amount), 0) as total_amount
+        ")
+            ->groupBy('method_uuid', 'label', 'code')
+            ->orderByDesc('total_amount')
+            ->get();
+
+        $grandTotal = (float) $rows->sum('total_amount');
+
+        $data = $rows->map(function ($row) use ($grandTotal) {
+            $amount = (float) $row->total_amount;
+            return [
+                'method_uuid'  => $row->method_uuid,
+                'label'        => $row->label,
+                'code'         => $row->code,
+                'count'        => (int) $row->count,
+                'total_amount' => round($amount, 2),
+                'percentage'   => $grandTotal > 0 ? round(($amount / $grandTotal) * 100, 1) : 0,
+            ];
+        });
+
+        return response()->json([
+            'status' => true,
+            'data'   => [
+                'total_amount' => round($grandTotal, 2),
+                'items'        => $data,
+            ],
+        ]);
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::getCashRegisterStats
+     * @permission_desc Afficher le nombre de caisses
+     */
+    public function getCashRegisterStats(Request $request)
+    {
+        $establishmentUuid = $request->header('X-Establishment-Uuid');
+
+        $baseQuery = CashRegister::where('establishment_uuid', $establishmentUuid);
+
+        $totalCashRegisters = (clone $baseQuery)->count();
+
+        $cashRegistersLastMonth = (clone $baseQuery)
+            ->where('created_at', '<', now()->startOfMonth())
+            ->count();
+
+        $growthRate = $cashRegistersLastMonth > 0
+            ? round((($totalCashRegisters - $cashRegistersLastMonth) / $cashRegistersLastMonth) * 100, 1)
+            : 0;
+
+        return response()->json([
+            'status' => true,
+            'data'   => [
+                'total'  => $totalCashRegisters,
+                'growth' => $growthRate,
+            ],
         ]);
     }
 

@@ -9,6 +9,7 @@ use App\Http\Requests\StoreCashRegisterRequest;
 use App\Models\CashRegister;
 use App\Models\CashRegisterSession;
 use App\Models\UserEstablishment;
+use App\Services\CashRegisterService;
 use App\Services\LicenseService;
 use App\Services\UserAuthorizationService;
 use Illuminate\Http\Request;
@@ -25,13 +26,15 @@ class CashRegisterController extends Controller
 {
     protected LicenseService $licenseService;
     protected UserAuthorizationService $authService;
-
+    protected  CashRegisterService $cashRegisterService;
     public function __construct(
         LicenseService $licenseService,
-        UserAuthorizationService $authService
+        UserAuthorizationService $authService,
+        CashRegisterService $cashRegisterService
     ) {
         $this->licenseService = $licenseService;
         $this->authService = $authService;
+        $this->cashRegisterService = $cashRegisterService;
     }
 
     /**
@@ -434,70 +437,71 @@ class CashRegisterController extends Controller
             'secret_key' => ['required', 'string'],
         ]);
 
-        $cashRegister = CashRegister::where('uuid', $uuid)
-            ->where('is_active', true)
-            ->firstOrFail();
+        $cashRegister = CashRegister::where('uuid', $uuid)->firstOrFail();
 
-        if (!$this->isValidSecretKey($cashRegister, $validated['secret_key'])) {
+        try {
+            $data = $this->cashRegisterService->open(
+                $cashRegister,
+                $validated['secret_key'],
+                auth()->id()
+            );
+
             return response()->json([
-                'status'  => false,
-                'message' => 'Code secret incorrect.',
-            ], 422);
+                'status'  => true,
+                'message' => 'Caisse ouverte et session démarrée avec succès.',
+                'data'    => $data,
+            ]);
+        } catch (ValidationException $e) {
+            return $this->transitionErrorResponse($cashRegister, $e);
         }
+    }
 
-        $currentStatus = $cashRegister->status?->value ?? $cashRegister->status;
+    /**
+     * Mettre la caisse en pause (sans code secret)
+     */
+    public function pause(Request $request, string $uuid): JsonResponse
+    {
+        $cashRegister = CashRegister::where('uuid', $uuid)->firstOrFail();
 
-        if ($currentStatus === 'open') {
+        try {
+            $data = $this->cashRegisterService->pause(
+                $cashRegister,
+                auth()->id()
+            );
+
             return response()->json([
-                'status'  => false,
-                'message' => 'Cette caisse est déjà ouverte.',
-            ], 422);
+                'status'  => true,
+                'message' => 'Caisse mise en pause avec succès.',
+                'data'    => $data,
+            ]);
+        } catch (ValidationException $e) {
+            return $this->transitionErrorResponse($cashRegister, $e);
         }
+    }
 
-        $userId = auth()->id();
-        $now = now();
-
-        $openingBalance = (float) ($cashRegister->current_balance ?? $cashRegister->initial_balance ?? 0);
-
-        $session = DB::transaction(function () use ($cashRegister, $openingBalance, $userId, $now) {
-            CashRegisterSession::where('cash_register_uuid', $cashRegister->uuid)
-                ->whereIn('status', ['open', 'paused'])
-                ->update([
-                    'status'     => 'closed',
-                    'closed_at'  => $now,
-                    'closed_by'  => $userId,
-                    'updated_by' => $userId,
-                ]);
-
-            $createdSession = CashRegisterSession::create([
-                'cash_register_uuid' => $cashRegister->uuid,
-                'establishment_uuid' => $cashRegister->establishment_uuid,
-                'user_id'            => $userId,
-                'status'             => 'open',
-                'opening_balance'    => $openingBalance,
-                'opened_at'          => $now,
-                'opened_by'          => $userId,
-                'created_by'         => $userId,
-                'updated_by'         => $userId,
-            ]);
-
-            $cashRegister->update([
-                'status'          => 'open',
-                'current_balance' => $openingBalance,
-                'updated_by'      => $userId,
-            ]);
-
-            return $createdSession;
-        });
-
-        return response()->json([
-            'status'  => true,
-            'message' => 'Caisse ouverte et session démarrée avec succès.',
-            'data'    => [
-                'cash_register' => $cashRegister->fresh(['establishment', 'user']),
-                'session'       => $session,
-            ],
+    /**
+     * Reprendre une caisse en pause (sans code secret)
+     */
+    public function resume(Request $request, string $uuid): JsonResponse
+    {
+        $validated = $request->validate([
+            'secret_key' => ['required', 'string'],
         ]);
+        $cashRegister = CashRegister::where('uuid', $uuid)->firstOrFail();
+        try {
+            $data = $this->cashRegisterService->resume(
+                $cashRegister,
+                $validated['secret_key'],
+                auth()->id()
+            );
+            return response()->json([
+                'status'  => true,
+                'message' => 'Caisse reprise avec succès.',
+                'data'    => $data,
+            ]);
+        } catch (ValidationException $e) {
+            return $this->transitionErrorResponse($cashRegister, $e);
+        }
     }
 
     public function close(Request $request, string $uuid): JsonResponse
@@ -507,65 +511,36 @@ class CashRegisterController extends Controller
             'closing_note' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $cashRegister = CashRegister::where('uuid', $uuid)
-            ->where('is_active', true)
-            ->firstOrFail();
+        $cashRegister = CashRegister::where('uuid', $uuid)->firstOrFail();
 
-        if (!$this->isValidSecretKey($cashRegister, $validated['secret_key'])) {
+        try {
+            $data = $this->cashRegisterService->close(
+                $cashRegister,
+                $validated['secret_key'],
+                auth()->id(),
+                $validated['closing_note'] ?? null
+            );
+
             return response()->json([
-                'status'  => false,
-                'message' => 'Code secret incorrect.',
-            ], 422);
-        }
-
-        $currentStatus = $cashRegister->status?->value ?? $cashRegister->status;
-
-        if ($currentStatus === 'closed') {
-            return response()->json([
-                'status'  => false,
-                'message' => 'Cette caisse est déjà fermée.',
-            ], 422);
-        }
-
-        $userId = auth()->id();
-        $now = now();
-
-        $session = DB::transaction(function () use ($cashRegister, $validated, $userId, $now) {
-            $activeSession = CashRegisterSession::where('cash_register_uuid', $cashRegister->uuid)
-                ->whereIn('status', ['open', 'paused'])
-                ->latest('opened_at')
-                ->first();
-
-            $balance = (float) ($cashRegister->current_balance ?? 0);
-
-            if ($activeSession) {
-                $activeSession->update([
-                    'status'                 => 'closed',
-                    'expected_closing_balance' => $balance,
-                    'closing_balance'        => $balance,
-                    'difference'             => 0,
-                    'closed_at'              => $now,
-                    'closing_note'           => $validated['closing_note'] ?? null,
-                    'closed_by'              => $userId,
-                    'updated_by'             => $userId,
-                ]);
-            }
-
-            $cashRegister->update([
-                'status'     => 'closed',
-                'updated_by' => $userId,
+                'status'  => true,
+                'message' => 'Caisse fermée et session clôturée avec succès.',
+                'data'    => $data,
             ]);
+        } catch (ValidationException $e) {
+            return $this->transitionErrorResponse($cashRegister, $e);
+        }
+    }
 
-            return $activeSession?->fresh();
-        });
+    private function transitionErrorResponse(CashRegister $cashRegister, ValidationException $e): JsonResponse
+    {
+        $firstMessage = collect($e->errors())->flatten()->first() ?? 'Opération non autorisée.';
+        $currentStatus = $this->cashRegisterService->resolveStatus($cashRegister)?->value;
 
         return response()->json([
-            'status'  => true,
-            'message' => 'Caisse fermée et session clôturée avec succès.',
-            'data'    => [
-                'cash_register' => $cashRegister->fresh(['establishment', 'user']),
-                'session'       => $session,
-            ],
-        ]);
+            'status'         => false,
+            'message'        => $firstMessage,
+            'current_status' => $currentStatus,
+            'errors'         => $e->errors(),
+        ], 422);
     }
 }

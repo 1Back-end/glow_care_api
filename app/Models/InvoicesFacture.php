@@ -29,6 +29,7 @@ class InvoicesFacture extends Model
         'date_fac',
         'created_by',
         'updated_by',
+        'cash_register_uuid',
     ];
 
     protected $casts = [
@@ -94,5 +95,9 @@ class InvoicesFacture extends Model
     public function updater()
     {
         return $this->belongsTo(User::class, 'updated_by');
+    }
+    public function cashRegister()
+    {
+        return $this->belongsTo(CashRegister::class, 'cash_register_uuid', 'uuid');
     }
 }

@@ -36,7 +36,8 @@ class Invoice extends Model
         'is_have_facture',
         'cancelled_at',
         'cancelled_by',
-        'qr_code'
+        'qr_code',
+        'cash_register_uuid',
     ];
 
     protected $casts = [
@@ -182,5 +183,9 @@ class Invoice extends Model
     public function payments()
     {
         return $this->hasMany(Payment::class, 'invoices_uuid', 'uuid');
+    }
+    public function cashRegister()
+    {
+        return $this->belongsTo(CashRegister::class, 'cash_register_uuid', 'uuid');
     }
 }

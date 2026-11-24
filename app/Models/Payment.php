@@ -36,6 +36,7 @@ class Payment extends Model
         'cancellation_reason',
         'cancelled_at',
         'cancelled_by',
+        'cash_register_uuid',
     ];
 
     protected $casts = [
@@ -59,5 +60,9 @@ class Payment extends Model
     public function cancellor()
     {
         return $this->belongsTo(User::class, 'cancelled_by');
+    }
+    public function cashRegister()
+    {
+        return $this->belongsTo(CashRegister::class, 'cash_register_uuid', 'uuid');
     }
 }

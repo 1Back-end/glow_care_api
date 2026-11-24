@@ -7,6 +7,7 @@ use App\Enums\PaymentMethodEnum;
 use App\Enums\StateFacture;
 use App\Http\Controllers\Controller;
 use App\Models\Appointment;
+use App\Models\CashRegister;
 use App\Models\Client;
 use App\Models\Establishment;
 use App\Models\Invoice;
@@ -15,6 +16,7 @@ use App\Models\InvoicesFacture;
 use App\Models\Payment;
 use App\Models\RegulationMethod;
 use App\Models\UserEstablishment;
+use App\Services\CashRegisterService;
 use App\Services\LicenseService;
 use App\Services\UserAuthorizationService;
 use Illuminate\Http\JsonResponse;
@@ -35,13 +37,17 @@ class InvoiceController extends Controller
 {
     protected LicenseService $licenseService;
     protected UserAuthorizationService $authService;
+    protected  CashRegisterService $cashRegisterService;
 
     public function __construct(
         LicenseService $licenseService,
-        UserAuthorizationService $authService
+        UserAuthorizationService $authService,
+        CashRegisterService $cashRegisterService
+
     ) {
         $this->licenseService = $licenseService;
         $this->authService = $authService;
+        $this->cashRegisterService = $cashRegisterService;
     }
 
     /**
@@ -105,7 +111,7 @@ class InvoiceController extends Controller
      * @permission InvoiceController::store
      * @permission_desc Créer une facture
      */
-    public function store(Request $request, LicenseService $licenseService)
+    public function store(Request $request, LicenseService $licenseService, CashRegisterService $cashRegisterService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
@@ -132,15 +138,36 @@ class InvoiceController extends Controller
 
         $user = auth()->user();
 
+        $cashRegister = CashRegister::query()
+            ->where('user_id', $user->id)
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->first();
+
         try {
-            return DB::transaction(function () use ($validated, $user, $establishmentUuid) {
+            $cashRegisterService->ensureCanInvoice($cashRegister);
+        } catch (ValidationException $e) {
+            $firstMessage = collect($e->errors())->flatten()->first()
+                ?? 'La caisse ne permet pas la facturation.';
+
+            return response()->json([
+                'success'        => false,
+                'message'        => $firstMessage,
+                'current_status' => $cashRegister
+                    ? $cashRegisterService->resolveStatus($cashRegister)?->value
+                    : null,
+                'errors'         => $e->errors(),
+            ], 422);
+        }
+
+        try {
+            return DB::transaction(function () use ($validated, $user, $establishmentUuid, $cashRegister) {
 
                 $stateFacture = $validated['regulated'] ?? StateFacture::CREATE->value;
 
-                // Correction : On retire 'type' d'ici pour éviter le conflit avec PrestationCategory
                 $invoice = Invoice::create([
                     'establishment_uuid' => $establishmentUuid,
                     'client_uuid'        => $validated['client_uuid'],
+                    'cash_register_uuid' => $cashRegister->uuid,
                     'regulated'          => $stateFacture,
                     'programmation_date' => $validated['programmation_date'] ?? now(),
                     'state'              => $validated['state'] ?? false,
@@ -152,6 +179,7 @@ class InvoiceController extends Controller
                     InvoiceItem::create([
                         'invoices_uuid'      => $invoice->uuid,
                         'establishment_uuid' => $establishmentUuid,
+                        'cash_register_uuid' => $cashRegister->uuid,
                         'prestation_uuid'    => $itemData['prestation_uuid'],
                         'quantity'           => $itemData['quantity'],
                         'price'              => $itemData['price'],
@@ -161,12 +189,12 @@ class InvoiceController extends Controller
                     ]);
                 }
 
-                // Récupération sécurisée du type de la première prestation pour la facture
                 $firstPrestationType = optional($invoice->items()->with('prestation')->first()?->prestation)->type;
 
                 InvoicesFacture::create([
                     'invoices_uuid'      => $invoice->uuid,
                     'establishment_uuid' => $establishmentUuid,
+                    'cash_register_uuid' => $cashRegister->uuid,
                     'type'               => $invoice->type ?? $firstPrestationType,
                     'state_facture'      => $stateFacture,
                     'amount'             => $invoice->total_amount,
@@ -174,7 +202,7 @@ class InvoiceController extends Controller
                     'created_by'         => $user->id,
                 ]);
 
-                $invoice->load(['client', 'establishment', 'items.prestation', 'facture']);
+                $invoice->load(['client', 'establishment', 'cashRegister', 'items.prestation', 'facture']);
 
                 $filename = time() . '_qrcode_' . $invoice->uuid . '.svg';
                 $path = 'invoices/qrcodes/' . $filename;
@@ -211,7 +239,7 @@ class InvoiceController extends Controller
                 return response()->json([
                     'success' => true,
                     'message' => 'Facturation enregistrée avec succès.',
-                    'data'    => $invoice
+                    'data'    => $invoice,
                 ], 201);
             });
 
@@ -221,7 +249,7 @@ class InvoiceController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => "Une erreur est survenue lors de l'enregistrement de la facture.",
-                'error'   => $e->getMessage()
+                'error'   => $e->getMessage(),
             ], 500);
         }
     }
@@ -233,7 +261,7 @@ class InvoiceController extends Controller
      * @permission InvoiceController::update
      * @permission_desc Mettre à jour une facture
      */
-    public function update(Request $request, $uuid, LicenseService $licenseService)
+    public function update(Request $request, $uuid, LicenseService $licenseService, CashRegisterService $cashRegisterService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
@@ -259,8 +287,29 @@ class InvoiceController extends Controller
         $user = auth()->user();
         $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $user->establishment_uuid;
 
+        $cashRegister = CashRegister::query()
+            ->where('user_id', $user->id)
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->first();
+
         try {
-            return DB::transaction(function () use ($validated, $user, $establishmentUuid, $uuid) {
+            $cashRegisterService->ensureCanInvoice($cashRegister);
+        } catch (ValidationException $e) {
+            $firstMessage = collect($e->errors())->flatten()->first()
+                ?? 'La caisse ne permet pas la mise à jour de la facturation.';
+
+            return response()->json([
+                'success'        => false,
+                'message'        => $firstMessage,
+                'current_status' => $cashRegister
+                    ? $cashRegisterService->resolveStatus($cashRegister)?->value
+                    : null,
+                'errors'         => $e->errors(),
+            ], 422);
+        }
+
+        try {
+            return DB::transaction(function () use ($validated, $user, $establishmentUuid, $uuid, $cashRegister) {
 
                 $invoice = Invoice::where('uuid', $uuid)
                     ->where('establishment_uuid', $establishmentUuid)
@@ -268,6 +317,7 @@ class InvoiceController extends Controller
 
                 $invoice->update([
                     'client_uuid'        => $validated['client_uuid'],
+                    'cash_register_uuid' => $cashRegister->uuid,
                     'regulated'          => $validated['regulated'] ?? $invoice->regulated,
                     'programmation_date' => $validated['programmation_date'] ?? $invoice->programmation_date,
                     'state'              => $validated['state'] ?? $invoice->state,
@@ -281,6 +331,7 @@ class InvoiceController extends Controller
                     InvoiceItem::create([
                         'invoices_uuid'      => $invoice->uuid,
                         'establishment_uuid' => $establishmentUuid,
+                        'cash_register_uuid' => $cashRegister->uuid,
                         'prestation_uuid'    => $itemData['prestation_uuid'],
                         'quantity'           => $itemData['quantity'],
                         'price'              => $itemData['price'],
@@ -299,15 +350,17 @@ class InvoiceController extends Controller
 
                 if ($facture) {
                     $facture->update([
-                        'type'          => $invoice->type ?? $firstPrestationType,
-                        'state_facture' => $invoice->regulated,
-                        'amount'        => $invoice->total_amount,
-                        'updated_by'    => $user->id,
+                        'cash_register_uuid' => $cashRegister->uuid,
+                        'type'               => $invoice->type ?? $firstPrestationType,
+                        'state_facture'      => $invoice->regulated,
+                        'amount'             => $invoice->total_amount,
+                        'updated_by'         => $user->id,
                     ]);
                 } else {
                     InvoicesFacture::create([
                         'invoices_uuid'      => $invoice->uuid,
                         'establishment_uuid' => $establishmentUuid,
+                        'cash_register_uuid' => $cashRegister->uuid,
                         'type'               => $invoice->type ?? $firstPrestationType,
                         'state_facture'      => $invoice->regulated,
                         'amount'             => $invoice->total_amount,
@@ -350,12 +403,12 @@ class InvoiceController extends Controller
                     ]);
                 }
 
-                $invoice->load(['client', 'items.prestation', 'facture', 'medias']);
+                $invoice->load(['client', 'cashRegister', 'items.prestation', 'facture', 'medias']);
 
                 return response()->json([
                     'success' => true,
                     'message' => 'Facturation mise à jour avec succès.',
-                    'data'    => $invoice
+                    'data'    => $invoice,
                 ], 200);
             });
 
@@ -365,7 +418,7 @@ class InvoiceController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => "Une erreur est survenue lors de la mise à jour de la facture.",
-                'error'   => $e->getMessage()
+                'error'   => $e->getMessage(),
             ], 500);
         }
     }
@@ -469,7 +522,7 @@ class InvoiceController extends Controller
      * @permission InvoiceController::initiatePayment
      * @permission_desc Encaisser une facture
      */
-    public function initiatePayment(Request $request, $uuid, LicenseService $licenseService)
+    public function initiatePayment(Request $request, $uuid, LicenseService $licenseService, CashRegisterService $cashRegisterService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
@@ -479,6 +532,27 @@ class InvoiceController extends Controller
         $this->authService->denyIfSuperAdmin($auth);
 
         $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $auth->establishment_uuid;
+
+        $cashRegister = CashRegister::query()
+            ->where('user_id', $auth->id)
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->first();
+
+        try {
+            $cashRegisterService->ensureCanInvoice($cashRegister);
+        } catch (ValidationException $e) {
+            $firstMessage = collect($e->errors())->flatten()->first()
+                ?? 'La caisse ne permet pas d\'effectuer un encaissement.';
+
+            return response()->json([
+                'success'        => false,
+                'message'        => $firstMessage,
+                'current_status' => $cashRegister
+                    ? $cashRegisterService->resolveStatus($cashRegister)?->value
+                    : null,
+                'errors'         => $e->errors(),
+            ], 422);
+        }
 
         $invoice = Invoice::where('establishment_uuid', $establishmentUuid)
             ->where('uuid', $uuid)
@@ -506,7 +580,7 @@ class InvoiceController extends Controller
         if (($existingPaymentsSum + $newPaymentsSum) > $totalInvoiceAmount) {
             $remainingDue = max(0, $totalInvoiceAmount - $existingPaymentsSum);
             throw ValidationException::withMessages([
-                'regulations' => ["Le montant total des paiements dépasse le montant dû de la facture. Reste à payer : {$remainingDue} FCFA."]
+                'regulations' => ["Le montant total des paiements dépasse le montant dû de la facture. Reste à payer : {$remainingDue} FCFA."],
             ]);
         }
 
@@ -516,27 +590,29 @@ class InvoiceController extends Controller
             if ($regulationMethod) {
                 if (!empty($regulationMethod->comment_required) && empty($regData['comment'])) {
                     throw ValidationException::withMessages([
-                        "regulations.{$index}.comment" => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                        "regulations.{$index}.comment" => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                     ]);
                 }
 
                 if (!empty($regulationMethod->reference_required) && empty($regData['reference'])) {
                     throw ValidationException::withMessages([
-                        "regulations.{$index}.reference" => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                        "regulations.{$index}.reference" => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                     ]);
                 }
+
                 if (!empty($regulationMethod->phone_required) && empty($regData['phone'])) {
                     throw ValidationException::withMessages([
-                        "regulations.{$index}.phone" => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                        "regulations.{$index}.phone" => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                     ]);
                 }
             }
         }
 
-        return DB::transaction(function () use ($validated, $invoice, $establishmentUuid, $auth, $totalInvoiceAmount, $existingPaymentsSum, $newPaymentsSum) {
+        return DB::transaction(function () use ($validated, $invoice, $establishmentUuid, $cashRegister, $auth, $totalInvoiceAmount, $existingPaymentsSum, $newPaymentsSum) {
             foreach ($validated['regulations'] as $regData) {
                 Payment::create([
                     'establishment_uuid'      => $establishmentUuid,
+                    'cash_register_uuid'      => $cashRegister->uuid,
                     'invoices_uuid'           => $invoice->uuid,
                     'regulation_methods_uuid' => $regData['method'],
                     'amount'                  => $regData['amount'],
@@ -566,7 +642,7 @@ class InvoiceController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Encaissements enregistrés avec succès.',
-                'data'    => $invoice->fresh()->load(['payments.regulation_methods', 'payments.cancellor']),
+                'data'    => $invoice->fresh()->load(['cashRegister', 'payments.regulation_methods', 'payments.cancellor']),
             ], 200);
         });
     }
@@ -653,7 +729,7 @@ class InvoiceController extends Controller
      * @permission InvoiceController::updatePayment
      * @permission_desc Modifier un encaissement
      */
-    public function updatePayment(Request $request, $uuid, LicenseService $licenseService)
+    public function updatePayment(Request $request, $uuid, LicenseService $licenseService, CashRegisterService $cashRegisterService)
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
             return $errorResponse;
@@ -662,13 +738,35 @@ class InvoiceController extends Controller
         $auth = auth()->user();
         $this->authService->denyIfSuperAdmin($auth);
 
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $auth->establishment_uuid;
+
+        $cashRegister = CashRegister::query()
+            ->where('user_id', $auth->id)
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->first();
+
+        try {
+            $cashRegisterService->ensureCanInvoice($cashRegister);
+        } catch (ValidationException $e) {
+            $firstMessage = collect($e->errors())->flatten()->first()
+                ?? 'La caisse ne permet pas de modifier un paiement.';
+
+            return response()->json([
+                'success'        => false,
+                'message'        => $firstMessage,
+                'current_status' => $cashRegister
+                    ? $cashRegisterService->resolveStatus($cashRegister)?->value
+                    : null,
+                'errors'         => $e->errors(),
+            ], 422);
+        }
 
         $payment = Payment::where('uuid', $uuid)
             ->firstOrFail();
 
         if ($payment->status === 'cancelled') {
             throw ValidationException::withMessages([
-                'payment' => ['Impossible de modifier un paiement annulé.']
+                'payment' => ['Impossible de modifier un paiement annulé.'],
             ]);
         }
 
@@ -695,7 +793,7 @@ class InvoiceController extends Controller
         if (($otherPaymentsSum + $validated['amount']) > $totalInvoiceAmount) {
             $remainingDue = max(0, $totalInvoiceAmount - $otherPaymentsSum);
             throw ValidationException::withMessages([
-                'amount' => ["Le montant total dépasse le montant dû de la facture. Maximum autorisé pour ce paiement : {$remainingDue} FCFA."]
+                'amount' => ["Le montant total dépasse le montant dû de la facture. Maximum autorisé pour ce paiement : {$remainingDue} FCFA."],
             ]);
         }
 
@@ -703,23 +801,24 @@ class InvoiceController extends Controller
         if ($regulationMethod) {
             if (!empty($regulationMethod->comment_required) && empty($validated['comment'])) {
                 throw ValidationException::withMessages([
-                    'comment' => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                    'comment' => ["Le commentaire est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                 ]);
             }
             if (!empty($regulationMethod->reference_required) && empty($validated['reference'])) {
                 throw ValidationException::withMessages([
-                    'reference' => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                    'reference' => ["La référence est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                 ]);
             }
             if (!empty($regulationMethod->phone_required) && empty($validated['phone'])) {
                 throw ValidationException::withMessages([
-                    'phone' => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"]
+                    'phone' => ["Le numéro de téléphone est obligatoire pour le mode de règlement : {$regulationMethod->name}"],
                 ]);
             }
         }
 
-        return DB::transaction(function () use ($payment, $invoice, $validated, $auth, $totalInvoiceAmount, $otherPaymentsSum) {
+        return DB::transaction(function () use ($payment, $invoice, $cashRegister, $validated, $auth, $totalInvoiceAmount, $otherPaymentsSum) {
             $payment->update([
+                'cash_register_uuid'      => $cashRegister->uuid,
                 'regulation_methods_uuid' => $validated['method'],
                 'amount'                  => $validated['amount'],
                 'phone'                   => $validated['phone'] ?? null,
@@ -746,7 +845,7 @@ class InvoiceController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Paiement modifié avec succès.',
-                'data'    => $invoice->fresh()->load(['payments.regulation_methods', 'payments.cancellor']),
+                'data'    => $invoice->fresh()->load(['cashRegister', 'payments.regulation_methods', 'payments.cancellor']),
             ], 200);
         });
     }
