@@ -401,18 +401,9 @@ class DashboardStatisticsController extends Controller
     public function RecentActivity(Request $request): JsonResponse
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
-        $limit = max(1, min((int) $request->get('limit', 5), 30));
-        $maxAppointments = 2;
+        $limit = max(1, min((int) $request->get('limit', 1), 10));
+        $maxAppointments = 1;
 
-        if (!$establishmentUuid) {
-            return response()->json([
-                'status'  => false,
-                'message' => 'En-tête X-Establishment-Uuid manquant.',
-                'data'    => [],
-            ], 422);
-        }
-
-        // 1. Clients récents (priorité 1)
         $clients = Client::where('establishment_uuid', $establishmentUuid)
             ->latest('created_at')
             ->take($limit)
@@ -434,7 +425,6 @@ class DashboardStatisticsController extends Controller
                 ];
             });
 
-        // 2. Rendez-vous récents — maximum 2 (priorité 2)
         $appointments = Appointment::with(['client:uuid,full_name', 'prestation:uuid,name'])
             ->where('establishment_uuid', $establishmentUuid)
             ->latest('created_at')
@@ -457,7 +447,6 @@ class DashboardStatisticsController extends Controller
                 ];
             });
 
-        // 3. Prestations récentes (priorité 3)
         $prestations = Prestation::where('establishment_uuid', $establishmentUuid)
             ->latest('created_at')
             ->take($limit)

@@ -30,5 +30,6 @@ Route::middleware(['activity'])->group(function () {
         require __DIR__ . '/modules/appointments.php';
         require __DIR__ . '/modules/invoices.php';
         require __DIR__ . '/modules/regulation_methods.php';
+        require __DIR__ . '/modules/cash_registers.php';
     });
 });
