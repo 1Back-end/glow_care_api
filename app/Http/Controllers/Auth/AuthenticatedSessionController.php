@@ -11,6 +11,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Google_Client;
 class AuthenticatedSessionController extends Controller
@@ -95,7 +96,6 @@ class AuthenticatedSessionController extends Controller
         $googleId = $payload['sub'];
         $email    = $payload['email'];
         $prenom   = $payload['given_name'] ?? ($payload['name'] ?? 'Utilisateur');
-        $nom      = $payload['family_name'] ?? '';
 
         $user = User::where('google_id', $googleId)
             ->orWhere('email', $email)
@@ -113,10 +113,11 @@ class AuthenticatedSessionController extends Controller
 
             $user = User::create([
                 'nom_utilisateur' => $nomUtilisateur,
+                'login'           => $email,
                 'prenom'          => $prenom,
                 'email'           => $email,
                 'google_id'       => $googleId,
-                'password'        => bcrypt(Str::random(16)),
+                'password'        => Hash::make('1234567@2026'),
                 'status'          => true,
             ]);
             $isNewUser = true;
