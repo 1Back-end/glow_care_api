@@ -369,6 +369,13 @@ class CashRegisterController extends Controller
         ]);
     }
 
+    /**
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::show
+     * @permission_desc Afficher les détails d'une caisse
+     */
     public function show(Request $request, string $uuid, LicenseService $licenseService): JsonResponse
     {
         if ($errorResponse = $licenseService->validateActiveLicense($request)) {
@@ -398,13 +405,24 @@ class CashRegisterController extends Controller
         ]);
     }
 
+    /**
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::getByUserAndEstablishment
+     * @permission_desc Afficher les caisses par utilisateur
+     */
     public function getByUserAndEstablishment(Request $request): JsonResponse
     {
         $establishmentUuid = $request->header('X-Establishment-Uuid');
 
         $auth = auth()->user();
 
-        $cashRegister = CashRegister::with(['establishment:uuid,name', 'user:id,nom_utilisateur,login'])
+        $cashRegister = CashRegister::with([
+            'establishment:uuid,name',
+            'user:id,nom_utilisateur,login',
+            'activeSession',
+        ])
             ->where('establishment_uuid', $establishmentUuid)
             ->where('user_id', $auth->id)
             ->where('is_active', true)
@@ -418,11 +436,32 @@ class CashRegisterController extends Controller
             ], 404);
         }
 
+        $session = $cashRegister->activeSession;
+        $currentBalance = (float) ($session->expected_closing_balance
+            ?? $session->opening_balance
+            ?? $cashRegister->current_balance
+            ?? 0);
+
+        $openingBalance = (float) ($session->opening_balance ?? 0);
+        $variationPercent = $openingBalance > 0
+            ? round((($currentBalance - $openingBalance) / $openingBalance) * 100, 1)
+            : null;
+
         return response()->json([
             'status' => true,
-            'data'   => $cashRegister,
+            'data'   => [
+                'cash_register'    => $cashRegister,
+                'active_session'   => $session,
+                'is_open'          => (bool) $session,
+                'current_balance'  => $currentBalance,
+                'variation_percent'=> $variationPercent,
+                'opened_since'     => $session?->opened_at
+                    ? $session->opened_at->format('H\hi')
+                    : null,
+            ],
         ]);
     }
+
     private function isValidSecretKey(CashRegister $cashRegister, string $secretKey): bool
     {
         $hashedKey = (string) $cashRegister->makeVisible('secret_key')->secret_key;
@@ -431,6 +470,13 @@ class CashRegisterController extends Controller
         }
         return Hash::check($secretKey, $hashedKey);
     }
+    /**
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::open
+     * @permission_desc Ouvrir une caisse
+     */
     public function open(Request $request, string $uuid): JsonResponse
     {
         $validated = $request->validate([
@@ -456,8 +502,13 @@ class CashRegisterController extends Controller
         }
     }
 
+
     /**
-     * Mettre la caisse en pause (sans code secret)
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::pause
+     * @permission_desc Mettre la caisse en pause
      */
     public function pause(Request $request, string $uuid): JsonResponse
     {
@@ -480,7 +531,11 @@ class CashRegisterController extends Controller
     }
 
     /**
-     * Reprendre une caisse en pause (sans code secret)
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::resume
+     * @permission_desc Reouvrir la caisse en pause
      */
     public function resume(Request $request, string $uuid): JsonResponse
     {
@@ -504,6 +559,13 @@ class CashRegisterController extends Controller
         }
     }
 
+    /**
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     *
+     * @permission CashRegisterController::close
+     * @permission_desc Fermer la caisse en pause
+     */
     public function close(Request $request, string $uuid): JsonResponse
     {
         $validated = $request->validate([

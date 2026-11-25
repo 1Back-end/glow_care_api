@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\DB;
 
@@ -102,5 +104,16 @@ class CashRegister extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+    public function sessions(): HasMany
+    {
+        return $this->hasMany(CashRegisterSession::class, 'cash_register_uuid', 'uuid');
+    }
+
+    public function activeSession(): HasOne
+    {
+        return $this->hasOne(CashRegisterSession::class, 'cash_register_uuid', 'uuid')
+            ->where('status', 'open')
+            ->latestOfMany('opened_at');
     }
 }

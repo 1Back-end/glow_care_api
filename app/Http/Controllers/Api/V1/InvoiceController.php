@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api\V1;
 use App\Enums\AppointmentOriginEnum;
 use App\Enums\PaymentMethodEnum;
 use App\Enums\StateFacture;
+use App\Enums\TransactionStatus;
+use App\Enums\TransactionType;
 use App\Http\Controllers\Controller;
 use App\Models\Appointment;
 use App\Models\CashRegister;
@@ -15,6 +17,7 @@ use App\Models\InvoiceItem;
 use App\Models\InvoicesFacture;
 use App\Models\Payment;
 use App\Models\RegulationMethod;
+use App\Models\Transaction;
 use App\Models\UserEstablishment;
 use App\Services\CashRegisterService;
 use App\Services\LicenseService;
@@ -175,6 +178,26 @@ class InvoiceController extends Controller
                     'created_by'         => $user->id,
                 ]);
 
+                $invoice->refresh();
+
+                $transactionAmount = $invoice->total_to_pay ?? $invoice->total_amount;
+
+                $regulationMethodUuid = $validated['regulation_methods_uuid'] ?? null;
+
+                Transaction::create([
+                    'type'                   => TransactionType::INCOME->value,
+                    'label'                  => 'Facture ' . ($invoice->code ?? $invoice->uuid),
+                    'regulation_methods_uuid'=> $regulationMethodUuid,
+                    'establishment_uuid'     => $establishmentUuid,
+                    'user_id'                => $user->id,
+                    'created_by'             => $user->id,
+                    'amount'                 => $transactionAmount,
+                    'transaction_date'       => now(),
+                    'status'                  => TransactionStatus::PENDING->value,
+                    'transactionable_type'   => $invoice->getMorphClass(),
+                    'transactionable_id'     => $invoice->uuid,
+                ]);
+
                 foreach ($validated['items'] as $index => $itemData) {
                     InvoiceItem::create([
                         'invoices_uuid'      => $invoice->uuid,
@@ -324,6 +347,37 @@ class InvoiceController extends Controller
                     'appointment_origin' => $validated['appointment_origin'] ?? $invoice->appointment_origin,
                     'updated_by'         => $user->id,
                 ]);
+                $invoice->refresh();
+
+                $transactionAmount = $invoice->total_to_pay ?? $invoice->total_amount;
+                $label = 'Facture ' . ($facture->reference ?? $invoice->code ?? $invoice->uuid);
+
+                $transaction = Transaction::where('transactionable_type', $invoice->getMorphClass())
+                    ->where('transactionable_id', $invoice->uuid)
+                    ->first();
+
+                if ($transaction) {
+                    $transaction->update([
+                        'label'      => $label,
+                        'amount'     => $transactionAmount,
+                        'updated_by' => $user->id,
+                    ]);
+                } else {
+                    Transaction::create([
+                        'type'                    => TransactionType::INCOME->value,
+                        'label'                   => $label,
+                        'regulation_methods_uuid' => null,
+                        'establishment_uuid'      => $establishmentUuid,
+                        'user_id'                 => $invoice->created_by ?? $user->id,
+                        'created_by'              => $invoice->created_by ?? $user->id,
+                        'updated_by'              => $user->id,
+                        'amount'                  => $transactionAmount,
+                        'transaction_date'        => $invoice->created_at ?? now(),
+                        'status'                  => TransactionStatus::PENDING->value,
+                        'transactionable_type'    => $invoice->getMorphClass(),
+                        'transactionable_id'      => $invoice->uuid,
+                    ]);
+                }
 
                 $invoice->items()->delete();
 
@@ -494,6 +548,20 @@ class InvoiceController extends Controller
                     ]);
                 }
 
+                $referenceFacture = $invoice->code ?? $invoice->uuid;
+
+                $transaction = Transaction::where('transactionable_type', $invoice->getMorphClass())
+                    ->where('transactionable_id', $invoice->uuid)
+                    ->first();
+
+                if ($transaction) {
+                    $transaction->update([
+                        'label'      => 'Annulation Facture ' . $referenceFacture,
+                        'status'     => TransactionStatus::CANCELLED->value,
+                        'updated_by' => $auth->id,
+                    ]);
+                }
+
                 $invoice->load(['client', 'items.prestation', 'facture']);
 
                 return response()->json([
@@ -569,13 +637,13 @@ class InvoiceController extends Controller
             'regulations.*.amount.gt' => 'Le montant du règlement doit être supérieur à 0.',
         ]);
 
-        $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
+        $totalInvoiceAmount = (float) ($invoice->total_amount ?? $invoice->amount ?? 0);
 
-        $existingPaymentsSum = Payment::where('invoices_uuid', $invoice->uuid)
+        $existingPaymentsSum = (float) Payment::where('invoices_uuid', $invoice->uuid)
             ->where('status', '!=', 'cancelled')
             ->sum('amount');
 
-        $newPaymentsSum = collect($validated['regulations'])->sum('amount');
+        $newPaymentsSum = (float) collect($validated['regulations'])->sum('amount');
 
         if (($existingPaymentsSum + $newPaymentsSum) > $totalInvoiceAmount) {
             $remainingDue = max(0, $totalInvoiceAmount - $existingPaymentsSum);
@@ -584,8 +652,11 @@ class InvoiceController extends Controller
             ]);
         }
 
+        $methodUuids = collect($validated['regulations'])->pluck('method')->unique()->values();
+        $regulationMethods = RegulationMethod::whereIn('uuid', $methodUuids)->get()->keyBy('uuid');
+
         foreach ($validated['regulations'] as $index => $regData) {
-            $regulationMethod = RegulationMethod::where('uuid', $regData['method'])->first();
+            $regulationMethod = $regulationMethods->get($regData['method']);
 
             if ($regulationMethod) {
                 if (!empty($regulationMethod->comment_required) && empty($regData['comment'])) {
@@ -608,9 +679,21 @@ class InvoiceController extends Controller
             }
         }
 
-        return DB::transaction(function () use ($validated, $invoice, $establishmentUuid, $cashRegister, $auth, $totalInvoiceAmount, $existingPaymentsSum, $newPaymentsSum) {
+        return DB::transaction(function () use (
+            $validated,
+            $invoice,
+            $establishmentUuid,
+            $cashRegister,
+            $auth,
+            $totalInvoiceAmount,
+            $existingPaymentsSum,
+            $newPaymentsSum,
+            $regulationMethods
+        ) {
+            $invoiceRef = $invoice->facture?->reference ?? $invoice->code ?? $invoice->uuid;
+
             foreach ($validated['regulations'] as $regData) {
-                Payment::create([
+                $payment = Payment::create([
                     'establishment_uuid'      => $establishmentUuid,
                     'cash_register_uuid'      => $cashRegister->uuid,
                     'invoices_uuid'           => $invoice->uuid,
@@ -622,9 +705,26 @@ class InvoiceController extends Controller
                     'status'                  => 'completed',
                     'created_by'              => $auth->id ?? null,
                 ]);
+
+                $methodName = $regulationMethods->get($regData['method'])?->name;
+
+                Transaction::create([
+                    'type'                    => TransactionType::INCOME->value,
+                    'label'                   => 'Encaissement Facture ' . $invoiceRef . ($methodName ? " ({$methodName})" : ''),
+                    'regulation_methods_uuid' => $regData['method'],
+                    'establishment_uuid'      => $establishmentUuid,
+                    'user_id'                 => $auth->id ?? null,
+                    'created_by'              => $auth->id ?? null,
+                    'amount'                  => $regData['amount'],
+                    'transaction_date'        => now(),
+                    'status'                  => TransactionStatus::VALIDATED->value,
+                    'transactionable_type'    => $payment->getMorphClass(),
+                    'transactionable_id'      => $payment->uuid,
+                ]);
             }
 
             $totalPaidNow = $existingPaymentsSum + $newPaymentsSum;
+            $remainingAmount = max(0, $totalInvoiceAmount - $totalPaidNow);
 
             if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
                 $newStatus = StateFacture::PAID->value;
@@ -638,6 +738,27 @@ class InvoiceController extends Controller
                 'regulated'  => $newStatus,
                 'updated_by' => $auth->id ?? null,
             ]);
+
+            $pendingInvoiceTx = Transaction::where('transactionable_type', $invoice->getMorphClass())
+                ->where('transactionable_id', $invoice->uuid)
+                ->where('status', TransactionStatus::PENDING->value)
+                ->first();
+
+            if ($pendingInvoiceTx) {
+                if ($newStatus === StateFacture::PAID->value) {
+                    $pendingInvoiceTx->update([
+                        'label'      => 'Facture ' . $invoiceRef . ' (Soldée)',
+                        'status'     => TransactionStatus::CANCELLED->value,
+                        'updated_by' => $auth->id ?? null,
+                    ]);
+                } elseif ($remainingAmount > 0) {
+                    $pendingInvoiceTx->update([
+                        'label'      => 'Facture ' . $invoiceRef . ' (Reste à payer)',
+                        'amount'     => $remainingAmount,
+                        'updated_by' => $auth->id ?? null,
+                    ]);
+                }
+            }
 
             return response()->json([
                 'success' => true,
@@ -695,11 +816,28 @@ class InvoiceController extends Controller
                 'updated_by'          => $auth->id ?? null,
             ]);
 
-            $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
+            $invoiceRef = $invoice->facture?->reference ?? $invoice->code ?? $invoice->uuid;
 
-            $totalPaidNow = Payment::where('invoices_uuid', $invoice->uuid)
+            // 1. Annuler la transaction validée rattachée à ce paiement
+            $paymentTransaction = Transaction::where('transactionable_type', $payment->getMorphClass())
+                ->where('transactionable_id', $payment->uuid)
+                ->first();
+
+            if ($paymentTransaction) {
+                $paymentTransaction->update([
+                    'label'      => 'Annulation Paiement Facture ' . $invoiceRef,
+                    'status'     => TransactionStatus::CANCELLED->value,
+                    'updated_by' => $auth->id ?? null,
+                ]);
+            }
+
+            $totalInvoiceAmount = (float) ($invoice->total_amount ?? $invoice->amount ?? 0);
+
+            $totalPaidNow = (float) Payment::where('invoices_uuid', $invoice->uuid)
                 ->where('status', '!=', 'cancelled')
                 ->sum('amount');
+
+            $remainingAmount = max(0, $totalInvoiceAmount - $totalPaidNow);
 
             if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
                 $newStatus = StateFacture::PAID->value;
@@ -713,6 +851,19 @@ class InvoiceController extends Controller
                 'regulated'  => $newStatus,
                 'updated_by' => $auth->id ?? null,
             ]);
+
+            $pendingInvoiceTx = Transaction::where('transactionable_type', $invoice->getMorphClass())
+                ->where('transactionable_id', $invoice->uuid)
+                ->where('status', TransactionStatus::PENDING->value)
+                ->first();
+
+            if ($pendingInvoiceTx && $remainingAmount > 0) {
+                $pendingInvoiceTx->update([
+                    'label'      => 'Facture ' . $invoiceRef . ($totalPaidNow > 0 ? ' (Reste à payer)' : ''),
+                    'amount'     => $remainingAmount,
+                    'updated_by' => $auth->id ?? null,
+                ]);
+            }
 
             return response()->json([
                 'success' => true,
@@ -783,14 +934,14 @@ class InvoiceController extends Controller
         $invoice = Invoice::where('uuid', $payment->invoices_uuid)
             ->firstOrFail();
 
-        $totalInvoiceAmount = $invoice->total_amount ?? $invoice->amount ?? 0;
+        $totalInvoiceAmount = (float) ($invoice->total_amount ?? $invoice->amount ?? 0);
 
-        $otherPaymentsSum = Payment::where('invoices_uuid', $invoice->uuid)
+        $otherPaymentsSum = (float) Payment::where('invoices_uuid', $invoice->uuid)
             ->where('uuid', '!=', $payment->uuid)
             ->where('status', '!=', 'cancelled')
             ->sum('amount');
 
-        if (($otherPaymentsSum + $validated['amount']) > $totalInvoiceAmount) {
+        if (($otherPaymentsSum + (float) $validated['amount']) > $totalInvoiceAmount) {
             $remainingDue = max(0, $totalInvoiceAmount - $otherPaymentsSum);
             throw ValidationException::withMessages([
                 'amount' => ["Le montant total dépasse le montant dû de la facture. Maximum autorisé pour ce paiement : {$remainingDue} FCFA."],
@@ -816,7 +967,17 @@ class InvoiceController extends Controller
             }
         }
 
-        return DB::transaction(function () use ($payment, $invoice, $cashRegister, $validated, $auth, $totalInvoiceAmount, $otherPaymentsSum) {
+        return DB::transaction(function () use (
+            $payment,
+            $invoice,
+            $cashRegister,
+            $validated,
+            $auth,
+            $totalInvoiceAmount,
+            $otherPaymentsSum,
+            $regulationMethod,
+            $establishmentUuid
+        ) {
             $payment->update([
                 'cash_register_uuid'      => $cashRegister->uuid,
                 'regulation_methods_uuid' => $validated['method'],
@@ -827,7 +988,41 @@ class InvoiceController extends Controller
                 'updated_by'              => $auth->id ?? null,
             ]);
 
-            $totalPaidNow = $otherPaymentsSum + $validated['amount'];
+            $invoiceRef = $invoice->facture?->reference ?? $invoice->code ?? $invoice->uuid;
+            $methodName = $regulationMethod?->name;
+            $txLabel = 'Encaissement Facture ' . $invoiceRef . ($methodName ? " ({$methodName})" : '');
+
+            $paymentTransaction = Transaction::where('transactionable_type', $payment->getMorphClass())
+                ->where('transactionable_id', $payment->uuid)
+                ->first();
+
+            if ($paymentTransaction) {
+                $paymentTransaction->update([
+                    'label'                   => $txLabel,
+                    'regulation_methods_uuid' => $validated['method'],
+                    'amount'                  => $validated['amount'],
+                    'status'                  => TransactionStatus::VALIDATED->value,
+                    'updated_by'              => $auth->id ?? null,
+                ]);
+            } else {
+                Transaction::create([
+                    'type'                    => TransactionType::INCOME->value,
+                    'label'                   => $txLabel,
+                    'regulation_methods_uuid' => $validated['method'],
+                    'establishment_uuid'      => $payment->establishment_uuid ?? $establishmentUuid,
+                    'user_id'                 => $auth->id ?? null,
+                    'created_by'              => $auth->id ?? null,
+                    'amount'                  => $validated['amount'],
+                    'transaction_date'        => now(),
+                    'status'                  => TransactionStatus::VALIDATED->value,
+                    'transactionable_type'    => $payment->getMorphClass(),
+                    'transactionable_id'      => $payment->uuid,
+                ]);
+            }
+
+            // 2. Recalculer l'état de la facture et le reste à payer
+            $totalPaidNow = $otherPaymentsSum + (float) $validated['amount'];
+            $remainingAmount = max(0, $totalInvoiceAmount - $totalPaidNow);
 
             if ($totalPaidNow >= $totalInvoiceAmount && $totalInvoiceAmount > 0) {
                 $newStatus = StateFacture::PAID->value;
@@ -841,6 +1036,28 @@ class InvoiceController extends Controller
                 'regulated'  => $newStatus,
                 'updated_by' => $auth->id ?? null,
             ]);
+
+            // 3. Synchroniser l'éventuelle transaction "pending" liée à la facture
+            $pendingInvoiceTx = Transaction::where('transactionable_type', $invoice->getMorphClass())
+                ->where('transactionable_id', $invoice->uuid)
+                ->where('status', TransactionStatus::PENDING->value)
+                ->first();
+
+            if ($pendingInvoiceTx) {
+                if ($newStatus === StateFacture::PAID->value) {
+                    $pendingInvoiceTx->update([
+                        'label'      => 'Facture ' . $invoiceRef . ' (Soldée)',
+                        'status'     => TransactionStatus::CANCELLED->value,
+                        'updated_by' => $auth->id ?? null,
+                    ]);
+                } elseif ($remainingAmount > 0) {
+                    $pendingInvoiceTx->update([
+                        'label'      => 'Facture ' . $invoiceRef . ' (Reste à payer)',
+                        'amount'     => $remainingAmount,
+                        'updated_by' => $auth->id ?? null,
+                    ]);
+                }
+            }
 
             return response()->json([
                 'success' => true,

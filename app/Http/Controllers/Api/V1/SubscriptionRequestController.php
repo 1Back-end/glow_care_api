@@ -18,6 +18,7 @@ use App\Services\UserAuthorizationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
@@ -97,15 +98,18 @@ class SubscriptionRequestController extends Controller
         $this->authService->denyIfSuperAdmin(auth()->user());
 
         $establishmentUuid = $request->header('X-Establishment-Uuid');
+        $action = $request->input('action', 'new');
 
         $validator = Validator::make([
             'establishment_uuid' => $establishmentUuid,
-            'license_uuid' => $request->input('license_uuid'),
-            'notes' => $request->input('notes'),
+            'license_uuid'       => $request->input('license_uuid'),
+            'notes'              => $request->input('notes'),
+            'action'             => $action,
         ], [
             'establishment_uuid' => 'required|uuid|exists:establishments,uuid',
-            'license_uuid' => 'required|uuid|exists:licenses,uuid',
-            'notes' => 'nullable|string|max:1000',
+            'license_uuid'       => 'required|uuid|exists:licenses,uuid',
+            'notes'              => 'nullable|string|max:1000',
+            'action'             => ['required', 'string', Rule::in(['new', 'prolongation'])],
         ]);
 
         if ($validator->fails()) {
@@ -152,7 +156,8 @@ class SubscriptionRequestController extends Controller
 
         $subscriptionRequest = SubscriptionRequest::where('uuid', $uuid)->firstOrFail();
 
-        if ($subscriptionRequest->status !== \App\Enums\SubscriptionStatus::PENDING->value) {
+        $currentStatus = $subscriptionRequest->status?->value ?? $subscriptionRequest->status;
+        if ($currentStatus !== \App\Enums\SubscriptionStatus::PENDING->value) {
             return response()->json([
                 'success' => false,
                 'message' => 'Impossible de modifier une demande qui n\'est plus en attente.'
@@ -160,35 +165,40 @@ class SubscriptionRequestController extends Controller
         }
 
         $establishmentUuid = $request->header('X-Establishment-Uuid');
+        $currentAction = $subscriptionRequest->action?->value ?? $subscriptionRequest->action ?? 'new';
+        $action = $request->input('action', $currentAction);
 
         $validator = Validator::make([
             'establishment_uuid' => $establishmentUuid,
-            'license_uuid' => $request->input('license_uuid'),
-            'notes' => $request->input('notes'),
+            'license_uuid'       => $request->input('license_uuid'),
+            'notes'              => $request->input('notes'),
+            'action'             => $action,
         ], [
             'establishment_uuid' => 'required|uuid|exists:establishments,uuid',
-            'license_uuid' => 'required|uuid|exists:licenses,uuid',
-            'notes' => 'nullable|string|max:1000',
+            'license_uuid'       => 'required|uuid|exists:licenses,uuid',
+            'notes'              => 'nullable|string|max:1000',
+            'action'             => ['required', 'string', Rule::in(['new', 'prolongation'])],
         ]);
 
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors()
+                'errors'  => $validator->errors()
             ], 422);
         }
 
         $subscriptionRequest->update([
             'establishment_uuid' => $establishmentUuid,
-            'license_uuid' => $request->input('license_uuid'),
-            'notes' => $request->input('notes'),
-            'updated_by' => auth()->id(),
+            'license_uuid'       => $request->input('license_uuid'),
+            'notes'              => $request->input('notes'),
+            'action'             => $action,
+            'updated_by'         => auth()->id(),
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Demande d\'abonnement mise à jour avec succès.',
-            'data' => $subscriptionRequest->fresh(['establishment', 'license'])
+            'data'    => $subscriptionRequest->fresh(['establishment', 'license'])
         ]);
     }
 
@@ -201,7 +211,9 @@ class SubscriptionRequestController extends Controller
      */
     public function updateStatus(Request $request, $uuid)
     {
-        $subscriptionRequest = SubscriptionRequest::with(['establishment', 'license'])->where('uuid', $uuid)->firstOrFail();
+        $subscriptionRequest = SubscriptionRequest::with(['establishment', 'license', 'creator'])
+            ->where('uuid', $uuid)
+            ->firstOrFail();
 
         $newStatus = $request->input('status');
 
@@ -215,8 +227,10 @@ class SubscriptionRequestController extends Controller
                     $fail('Le mot de passe saisi est incorrect.');
                 }
             }];
-        } elseif ($newStatus === SubscriptionStatus::REJECTED->value || $newStatus === 'rejected' ||
-            $newStatus === SubscriptionStatus::CANCELLED->value || $newStatus === 'cancelled') {
+        } elseif (
+            $newStatus === SubscriptionStatus::REJECTED->value || $newStatus === 'rejected' ||
+            $newStatus === SubscriptionStatus::CANCELLED->value || $newStatus === 'cancelled'
+        ) {
             $validationRules['reason'] = ['required', 'string', 'min:3', 'max:500'];
         }
 
@@ -225,7 +239,7 @@ class SubscriptionRequestController extends Controller
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'errors' => $validator->errors()
+                'errors'  => $validator->errors(),
             ], 422);
         }
 
@@ -233,72 +247,102 @@ class SubscriptionRequestController extends Controller
         $userId = auth()->id();
         $plainOtp = null;
 
-        $data = [
-            'status' => $newStatus,
-        ];
+        DB::transaction(function () use (
+            $subscriptionRequest,
+            $newStatus,
+            $reason,
+            $userId,
+            &$plainOtp
+        ) {
+            $data = [
+                'status'     => $newStatus,
+                'updated_by' => $userId,
+            ];
 
-        switch ($newStatus) {
-            case SubscriptionStatus::VALIDATED->value:
-                $data['validated_by'] = $userId;
-                $data['reason_for_rejected'] = null;
-                $data['reason_for_cancelled'] = null;
-                $data['updated_by'] = $userId;
-                break;
+            switch ($newStatus) {
+                case SubscriptionStatus::VALIDATED->value:
+                    $data['validated_by'] = $userId;
+                    $data['reason_for_rejected'] = null;
+                    $data['reason_for_cancelled'] = null;
+                    break;
 
-            case SubscriptionStatus::REJECTED->value:
-            case 'rejected':
-                $data['rejected_by'] = $userId;
-                $data['reason_for_rejected'] = $reason;
-                $data['updated_by'] = $userId;
-                break;
+                case SubscriptionStatus::REJECTED->value:
+                case 'rejected':
+                    $data['rejected_by'] = $userId;
+                    $data['reason_for_rejected'] = $reason;
+                    break;
 
-            case SubscriptionStatus::CANCELLED->value:
-            case 'cancelled':
-                $data['cancelled_by'] = $userId;
-                $data['reason_for_cancelled'] = $reason;
-                $data['updated_by'] = $userId;
-                break;
-
-            default:
-                $data['updated_by'] = $userId;
-                break;
-        }
-
-        $subscriptionRequest->update($data);
-
-        if ($newStatus === SubscriptionStatus::VALIDATED->value) {
-            $license = $subscriptionRequest->license;
-            $establishment = $subscriptionRequest->establishment;
-
-            if ($license && $establishment) {
-                EstablishmentActivation::where('establishment_uuid', $establishment->uuid)->delete();
-                $now = Carbon::now();
-
-                $expiresAt = match ($license->duration_unit) {
-                    'days'   => (clone $now)->addDays($license->duration_value),
-                    'weeks'  => (clone $now)->addWeeks($license->duration_value),
-                    'months' => (clone $now)->addMonths($license->duration_value),
-                    'years'  => (clone $now)->addYears($license->duration_value),
-                    default  => (clone $now)->addDays($license->duration_value),
-                };
-
-                $plainOtp = random_int(10000000, 99999999);
-                EstablishmentActivation::create([
-                    'establishment_uuid' => $establishment->uuid,
-                    'license_uuid'       => $license->uuid,
-                    'otp'                => Hash::make($plainOtp),
-                    'starts_at'          => $now,
-                    'expires_at'         => $expiresAt,
-                    'otp_expired_at'     => now()->addHours(24),
-                    'is_active'          => false,
-                    'status'             => ActivationStatus::PENDING->value,
-                    'created_by'         => $userId,
-                    'updated_by'         => $userId,
-                ]);
+                case SubscriptionStatus::CANCELLED->value:
+                case 'cancelled':
+                    $data['cancelled_by'] = $userId;
+                    $data['reason_for_cancelled'] = $reason;
+                    break;
             }
-        }
 
-        $notification = new SubscriptionRequestStatusUpdatedNotification($subscriptionRequest, $newStatus, $reason, $plainOtp);
+            $subscriptionRequest->update($data);
+
+            if ($newStatus === SubscriptionStatus::VALIDATED->value) {
+                $license = $subscriptionRequest->license;
+                $establishment = $subscriptionRequest->establishment;
+                $action = $subscriptionRequest->action?->value ?? $subscriptionRequest->action ?? 'new';
+
+                if ($license && $establishment) {
+                    $now = Carbon::now();
+                    $startsAt = $now->copy();
+                    $bonusDays = 0;
+
+                    if ($action === 'prolongation') {
+                        $latestActivation = EstablishmentActivation::where('establishment_uuid', $establishment->uuid)
+                            ->whereNotNull('expires_at')
+                            ->orderByDesc('expires_at')
+                            ->first();
+
+                        if ($latestActivation?->expires_at) {
+                            $currentExpiry = Carbon::parse($latestActivation->expires_at);
+                            if ($currentExpiry->greaterThan($now)) {
+                                $bonusDays = max(0, (int) round($now->diffInDays($currentExpiry, false)));
+                            }
+                        }
+                    } else {
+                        EstablishmentActivation::where('establishment_uuid', $establishment->uuid)->delete();
+                    }
+
+                    $expiresAt = match ($license->duration_unit) {
+                        'days'   => (clone $startsAt)->addDays((int) $license->duration_value),
+                        'weeks'  => (clone $startsAt)->addWeeks((int) $license->duration_value),
+                        'months' => (clone $startsAt)->addMonths((int) $license->duration_value),
+                        'years'  => (clone $startsAt)->addYears((int) $license->duration_value),
+                        default  => (clone $startsAt)->addDays((int) $license->duration_value),
+                    };
+
+                    if ($bonusDays > 0) {
+                        $expiresAt->addDays($bonusDays);
+                    }
+
+                    $plainOtp = random_int(10000000, 99999999);
+
+                    EstablishmentActivation::create([
+                        'establishment_uuid' => $establishment->uuid,
+                        'license_uuid'       => $license->uuid,
+                        'otp'                => Hash::make($plainOtp),
+                        'starts_at'          => $startsAt,
+                        'expires_at'         => $expiresAt,
+                        'otp_expired_at'     => $now->copy()->addHours(24),
+                        'is_active'          => false,
+                        'status'             => ActivationStatus::PENDING->value,
+                        'created_by'         => $userId,
+                        'updated_by'         => $userId,
+                    ]);
+                }
+            }
+        });
+
+        $notification = new SubscriptionRequestStatusUpdatedNotification(
+            $subscriptionRequest,
+            $newStatus,
+            $reason,
+            $plainOtp
+        );
 
         if ($subscriptionRequest->creator) {
             $subscriptionRequest->creator->notify($notification);
@@ -309,7 +353,7 @@ class SubscriptionRequestController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Statut de la demande mis à jour avec succès.',
-            'data' => $subscriptionRequest->fresh(['establishment', 'license', 'validator', 'rejector', 'canceller'])
+            'data'    => $subscriptionRequest->fresh(['establishment', 'license', 'validator', 'rejector', 'canceller']),
         ]);
     }
 

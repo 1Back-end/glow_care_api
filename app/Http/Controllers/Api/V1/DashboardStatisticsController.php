@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Enums\AppointmentStatus;
 use App\Enums\StateFacture;
+use App\Enums\TransactionStatus;
+use App\Enums\TransactionType;
 use App\Http\Controllers\Controller;
 use App\Models\Appointment;
 use App\Models\CashRegister;
@@ -13,11 +15,13 @@ use App\Models\InvoiceItem;
 use App\Models\Owner;
 use App\Models\Payment;
 use App\Models\Prestation;
+use App\Models\Transaction;
 use App\Services\LicenseService;
 use Carbon\CarbonInterface;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -607,5 +611,114 @@ class DashboardStatisticsController extends Controller
             'status' => true,
             'data'   => $activities,
         ]);
+    }
+
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::byPeriod
+     * @permission_desc Afficher la liste des transactions
+     */
+    public function byPeriod(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'period' => ['nullable', 'string', Rule::in(['7d', '30d', '3m', '1y'])],
+            'type'   => ['nullable', 'string', Rule::in(TransactionType::values())],
+            'status' => ['nullable', 'string', Rule::in(TransactionStatus::values())],
+        ]);
+
+        $period = $validated['period'] ?? '30d';
+        $now = Carbon::now();
+
+        $startDate = match ($period) {
+            '7d'  => $now->copy()->subDays(7),
+            '30d' => $now->copy()->subDays(30),
+            '3m'  => $now->copy()->subMonths(3),
+            '1y'  => $now->copy()->subYear(),
+        };
+
+        $user = auth()->user();
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? $user?->establishment_uuid;
+
+        $baseQuery = Transaction::query()
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->where('transaction_date', '>=', $startDate)
+            ->when(!empty($validated['type']), fn ($q) => $q->where('type', $validated['type']))
+            ->when(!empty($validated['status']), fn ($q) => $q->where('status', $validated['status']));
+
+        $allMatching = (clone $baseQuery)->get(['type', 'status', 'amount']);
+
+        $validatedIncome = (float) $allMatching
+            ->filter(fn ($tx) => ($tx->type?->value ?? $tx->type) === TransactionType::INCOME->value
+                && ($tx->status?->value ?? $tx->status) === TransactionStatus::VALIDATED->value)
+            ->sum('amount');
+
+        $validatedExpense = (float) $allMatching
+            ->filter(fn ($tx) => ($tx->type?->value ?? $tx->type) === TransactionType::EXPENSE->value
+                && ($tx->status?->value ?? $tx->status) === TransactionStatus::VALIDATED->value)
+            ->sum('amount');
+
+        $transactions = (clone $baseQuery)
+            ->with([
+                'regulationMethod:uuid,name',
+                'establishment:uuid,name',
+                'user:id,nom_utilisateur',
+                'creator:id,nom_utilisateur',
+                'transactionable',
+            ])
+            ->orderByDesc('transaction_date')
+            ->limit(20)
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'period'  => $period,
+            'from'    => $startDate->toIso8601String(),
+            'to'      => $now->toIso8601String(),
+            'summary' => [
+                'count'             => $allMatching->count(),
+                'displayed_count'   => $transactions->count(),
+                'validated_income'  => $validatedIncome,
+                'validated_expense' => $validatedExpense,
+                'net_validated'     => $validatedIncome - $validatedExpense,
+            ],
+            'data'    => $transactions,
+        ], 200);
+    }
+
+    /**
+     * @param Request $request
+     * @return JsonResponse
+     *
+     * @permission DashboardStatisticsController::todayTransactionsCount
+     * @permission_desc Afficher le nombre de transactions par jour
+     */
+    public function todayTransactionsCount(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'date' => ['nullable', 'date_format:Y-m-d'],
+        ]);
+
+        $targetDate = !empty($validated['date'])
+            ? Carbon::createFromFormat('Y-m-d', $validated['date'])
+            : Carbon::today();
+
+        $establishmentUuid = $request->header('X-Establishment-Uuid') ?? auth()->user()?->establishment_uuid;
+
+        $total = Transaction::query()
+            ->when($establishmentUuid, fn ($q) => $q->where('establishment_uuid', $establishmentUuid))
+            ->whereBetween('transaction_date', [
+                $targetDate->copy()->startOfDay(),
+                $targetDate->copy()->endOfDay(),
+            ])
+            ->count();
+
+        return response()->json([
+            'success' => true,
+            'total'   => $total,
+            'label'   => $targetDate->isToday() ? "aujourd'hui" : $targetDate->format('d/m/Y'),
+        ], 200);
     }
 }

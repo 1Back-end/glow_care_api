@@ -75,19 +75,27 @@ class AuthenticatedSessionController extends Controller
             'id_token' => 'required|string',
         ]);
 
-        $client = new Google_Client(['client_id' => env('GOOGLE_CLIENT_ID')]);
+        $client = new Google_Client(['client_id' => config('services.google.client_id')]);
         $payload = $client->verifyIdToken($request->id_token);
 
         if (!$payload) {
             return response()->json([
-                "status" => "error",
-                "message" => "Jeton Google invalide ou expiré !"
+                'status'  => 'error',
+                'message' => 'Jeton Google invalide ou expiré !',
+            ], Response::HTTP_UNAUTHORIZED);
+        }
+
+        if (empty($payload['email_verified'])) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Votre email Google n\'est pas vérifié !',
             ], Response::HTTP_UNAUTHORIZED);
         }
 
         $googleId = $payload['sub'];
-        $email = $payload['email'];
-        $name = $payload['name'] ?? 'Utilisateur Google';
+        $email    = $payload['email'];
+        $prenom   = $payload['given_name'] ?? ($payload['name'] ?? 'Utilisateur');
+        $nom      = $payload['family_name'] ?? '';
 
         $user = User::where('google_id', $googleId)
             ->orWhere('email', $email)
@@ -96,23 +104,33 @@ class AuthenticatedSessionController extends Controller
         $isNewUser = false;
 
         if (!$user) {
+            $base = Str::slug(Str::before($email, '@'), '_');
+            $nomUtilisateur = $base;
+            $i = 1;
+            while (User::where('nom_utilisateur', $nomUtilisateur)->exists()) {
+                $nomUtilisateur = $base . '_' . $i++;
+            }
+
             $user = User::create([
-                'name' => $name,
-                'email' => $email,
-                'google_id' => $googleId,
-                'password' => bcrypt(Str::random(16)),
-                'status' => true,
+                'nom_utilisateur' => $nomUtilisateur,
+                'prenom'          => $prenom,
+                'email'           => $email,
+                'google_id'       => $googleId,
+                'password'        => bcrypt(Str::random(16)),
+                'status'          => true,
             ]);
             $isNewUser = true;
         } elseif (!$user->google_id) {
             $user->update(['google_id' => $googleId]);
         }
+
         if (!$user->status) {
             return response()->json([
-                "status" => "error",
-                "message" => "Votre compte est désactivé !"
+                'status'  => 'error',
+                'message' => 'Votre compte est désactivé !',
             ], Response::HTTP_UNAUTHORIZED);
         }
+
         $permissions = load_permissions($user);
         $roles = $user->roles()->pluck('name');
 
@@ -127,11 +145,11 @@ class AuthenticatedSessionController extends Controller
 
         return response()->json([
             'access_token' => $access->plainTextToken,
-            'expire_in' => $access->accessToken->expires_at ? $access->accessToken->expires_at->toIso8601String() : null,
-            'new_user' => $isNewUser || $user->default,
-            'permissions' => $permissions,
-            'user' => $user,
-            'roles' => $roles,
+            'expire_in'    => $access->accessToken->expires_at?->toIso8601String(),
+            'new_user'     => $isNewUser || $user->default,
+            'permissions'  => $permissions,
+            'user'         => $user,
+            'roles'        => $roles,
         ]);
     }
 

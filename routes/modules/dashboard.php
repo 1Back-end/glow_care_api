@@ -11,3 +11,5 @@ Route::get('/dashboard/appointments-today', [\App\Http\Controllers\Api\V1\Dashbo
 Route::get('/dashboard/recent-activities', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'RecentActivity']);
 Route::get('/dashboard/getCashRegisterStats', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'getCashRegisterStats']);
 Route::get('/dashboard/payments-by-regulation-method', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'getPaymentsByRegulationMethod']);
+Route::get('/dashboard/transactions/period', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'byPeriod']);
+Route::get('/dashboard/transactions/today-count', [\App\Http\Controllers\Api\V1\DashboardStatisticsController::class, 'todayTransactionsCount']);

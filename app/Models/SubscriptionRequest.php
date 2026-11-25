@@ -32,6 +32,7 @@ class SubscriptionRequest extends Model
         'establishment_uuid',
         'license_uuid',
         'notes',
+        'action'
     ];
 
     protected $casts = [

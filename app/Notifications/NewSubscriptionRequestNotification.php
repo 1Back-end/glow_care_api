@@ -31,11 +31,18 @@ class NewSubscriptionRequestNotification extends Notification
     private function payload(): array
     {
         $establishment = $this->subscriptionRequest->establishment?->name ?? '';
+        $action = $this->subscriptionRequest->action?->value ?? $this->subscriptionRequest->action ?? 'new';
+        $isProlongation = $action === 'prolongation';
+
+        $message = $isProlongation
+            ? "Demande de prolongation d'abonnement reçue pour l'établissement {$establishment}"
+            : "Nouvelle demande d'abonnement reçue pour l'établissement {$establishment}";
 
         return [
-            'title'              => "Demande d'abonnement",
+            'title'              => $isProlongation ? "Prolongation d'abonnement" : "Demande d'abonnement",
             'kind'               => 'subscription_request',
-            'message'            => "Nouvelle demande d'abonnement reçue pour l'établissement {$establishment}",
+            'action'             => $action,
+            'message'            => $message,
             'uuid'               => $this->subscriptionRequest->uuid,
             'establishment_uuid' => $this->subscriptionRequest->establishment_uuid,
             'establishment_name' => $establishment,
